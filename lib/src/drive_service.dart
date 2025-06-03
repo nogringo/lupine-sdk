@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:lupine_sdk/src/derive_nostr_public_key_from_private_key.dart';
+import 'package:lupine_sdk/src/privkey_to_pubkey.dart';
 import 'package:lupine_sdk/src/config.dart';
 import 'package:lupine_sdk/src/get_available_file_path.dart';
 import 'package:lupine_sdk/src/models/drive_event.dart';
@@ -42,7 +42,7 @@ class DriveService {
     if (ndk.accounts.isLoggedIn) return;
 
     this.privkey = privkey;
-    final pubkey = deriveNostrPublicKeyFromPrivateKey(privkey);
+    final pubkey = privkeyToPubkey(privkey);
 
     ndk.accounts.loginPrivateKey(privkey: privkey, pubkey: pubkey);
 

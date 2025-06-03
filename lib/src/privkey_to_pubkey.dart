@@ -47,7 +47,7 @@ Uint8List _encodeBigIntTo32Bytes(BigInt bigInt) {
 /// 32-byte private key.
 /// Returns a hexadecimal string representing only the X-coordinate of the public key (32 bytes),
 /// which is the standard format for Nostr pubkeys.
-String deriveNostrPublicKeyFromPrivateKey(String privateKeyHex) {
+String privkeyToPubkey(String privateKeyHex) {
   final Uint8List privateKeyBytes = hexToBytes(privateKeyHex);
 
   if (privateKeyBytes.length != 32) {
