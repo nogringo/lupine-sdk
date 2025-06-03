@@ -81,6 +81,12 @@ class DriveService {
     }
   }
 
+  void logout() async {
+    privkey = "";
+    driveEvents = [];
+    ndk.accounts.logout();
+  }
+
   void update() {
     _updaterController.add(true);
   }
