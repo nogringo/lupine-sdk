@@ -1,6 +1,6 @@
 name: lupine_sdk
 description: A dart package to store files on nostr using blossom.
-version: 1.0.0
+version: 1.0.1
 repository: https://github.com/nogringo/lupine-sdk
 
 environment:
