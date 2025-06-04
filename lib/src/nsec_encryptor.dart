@@ -17,16 +17,28 @@ class NsecEncryptor {
     return Nip44.decryptMessage(payload, privkey, privkeyToPubkey(privkey));
   }
 
-  static Future<Uint8List> encryptFile({
+  static Future<Uint8List> encryptFileFromPath({
     required String inputPath,
+    required String privkey,
+    bool deterministic = false,
+  }) async {
+    final file = File(inputPath);
+    final bytes = await file.readAsBytes();
+
+    return encryptFile(
+      bytes: bytes,
+      privkey: privkey,
+      deterministic: deterministic,
+    );
+  }
+
+  static Future<Uint8List> encryptFile({
+    required Uint8List bytes,
     required String privkey,
     bool deterministic = false,
   }) async {
     final keyBytes = _parseNsecKey(privkey);
     final key = Key(keyBytes);
-
-    final file = File(inputPath);
-    final bytes = await file.readAsBytes();
 
     final iv =
         deterministic

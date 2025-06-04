@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:lupine_sdk/src/constants.dart';
 import 'package:lupine_sdk/src/privkey_to_pubkey.dart';
 import 'package:lupine_sdk/src/config.dart';
 import 'package:lupine_sdk/src/get_available_file_path.dart';
@@ -96,7 +98,8 @@ class DriveService {
   }
 
   Future<void> addFolder(String path, String destPath) async {
-    print("addFolder $path $destPath");
+    if (isWeb) return;
+
     final dir = Directory(path);
     final List<FileSystemEntity> entities = await dir.list().toList();
 
@@ -108,42 +111,60 @@ class DriveService {
         print(newFolderPath);
         await addFolder(entity.path, newFolderPath);
       } else if (stat.type == FileSystemEntityType.file) {
-        await addFile(entity.path, destPath: newFolderPath);
+        await addFileFromPath(entity.path, destPath: newFolderPath);
       }
     }
 
     createFolder(p.basename(path), destPath: destPath);
   }
 
-  Future<void> addFile(String path, {String destPath = "/"}) async {
+  Future<void> addFileFromPath(String path, {String destPath = "/"}) async {
+    if (isWeb) return;
+
     final file = File(path);
+    final bytes = await file.readAsBytes();
 
-    final fileSize = await file.length();
     final fileMimeType = lookupMimeType(path);
+    final fileName = path.split("/").last;
 
-    final bytes = await NsecEncryptor.encryptFile(
-      inputPath: path,
+    await addFile(
+      bytes: bytes,
+      name: fileName,
+      mimeType: fileMimeType,
+      destPath: destPath,
+    );
+  }
+
+  Future<void> addFile({
+    required Uint8List bytes,
+    String name = "Untitled",
+    String? mimeType,
+    String destPath = "/",
+  }) async {
+    final fileSize = bytes.length;
+
+    final encryptedBytes = await NsecEncryptor.encryptFile(
+      bytes: bytes,
       privkey: privkey,
       deterministic: true,
     );
 
     final responses = await ndk.blossom.uploadBlob(
-      data: bytes,
+      data: encryptedBytes,
       serverUrls: blossomServers,
     );
 
     if (responses.isEmpty) return;
 
     final fileId = responses.first.descriptor!.sha256;
-    final fileName = path.split("/").last;
 
     List<String> fileData = [
       "x",
       fileId,
-      "$destPath/$fileName",
+      "$destPath/$name",
       fileSize.toString(),
     ];
-    if (fileMimeType != null) fileData.add(fileMimeType);
+    if (mimeType != null) fileData.add(mimeType);
 
     final fileEvent = Nip01Event(
       pubKey: pubkey,
@@ -322,7 +343,7 @@ class DriveService {
         await downloadEntity(child, entityDir.path);
       }
     }
-    
+
     if (entity.isFile) {
       final bytes = await entity.download();
       final desiredFilePath = p.join(destPath, entity.name);
