@@ -1,7 +1,6 @@
 import 'dart:typed_data';
 
 import 'package:lupine_sdk/lupine_sdk.dart';
-import 'package:lupine_sdk/src/config.dart';
 import 'package:lupine_sdk/src/nsec_encryptor.dart';
 import 'package:ndk/ndk.dart';
 import 'package:path/path.dart' as p;
@@ -43,7 +42,6 @@ class DriveEvent {
 
     final blobResponse = await DriveService().ndk.blossom.getBlob(
       sha256: fileId,
-      serverUrls: blossomServers,
     );
 
     final decryptedBytes = await NsecEncryptor.decryptFile(

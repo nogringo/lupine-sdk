@@ -25,20 +25,21 @@ class DriveService {
   final _updaterController = StreamController<dynamic>.broadcast();
   Stream<dynamic> get updateEvents => _updaterController.stream;
 
-  final ndk = Ndk(
-    NdkConfig(
-      eventVerifier: NoEventVerifier(),
-      cache: MemCacheManager(),
-      bootstrapRelays: [
-        "wss://proxy.nostr-relay.app/cf045ae94b02d503351d4b0a2fe888df46ce416df9a70ee79206241d1f815b84",
-        "ws://umbrel:4848",
-      ],
-    ),
-  );
+  late Ndk ndk;
 
   List<DriveEvent> driveEvents = [];
 
   String get pubkey => ndk.accounts.getLoggedAccount()!.pubkey;
+
+  Future<void> init() async {
+    ndk = Ndk(
+      NdkConfig(
+        eventVerifier: NoEventVerifier(),
+        cache: MemCacheManager(),
+        bootstrapRelays: bootstrapRelays,
+      ),
+    );
+  }
 
   void login({required privkey}) async {
     if (ndk.accounts.isLoggedIn) return;
@@ -149,14 +150,12 @@ class DriveService {
       deterministic: true,
     );
 
-    final responses = await ndk.blossom.uploadBlob(
-      data: encryptedBytes,
-      serverUrls: blossomServers,
-    );
+    final responses = await ndk.blossom.uploadBlob(data: encryptedBytes);
 
     if (responses.isEmpty) return;
 
-    final fileId = responses.first.descriptor!.sha256;
+    final fileId = responses.first.descriptor?.sha256;
+    if (fileId == null) return;
 
     List<String> fileData = [
       "x",
@@ -174,36 +173,6 @@ class DriveService {
     );
 
     ndk.broadcast.broadcast(nostrEvent: fileEvent);
-  }
-
-  void listBlobs() async {
-    try {
-      final responses = await ndk.blossom.listBlobs(
-        pubkey:
-            "0ca3f123c42ba503f7dc5962f3768ca0c9ae36806f8aa96543e28cc8f24ce9b5",
-        serverUrls: blossomServers,
-      );
-
-      for (var response in responses) {
-        print(response.sha256);
-      }
-    } catch (e) {
-      print(e);
-    }
-  }
-
-  void checkBlob() async {
-    try {
-      final response = await ndk.blossom.checkBlob(
-        sha256:
-            "fdce6b78e828130971bfd21c3ee87d4dd2c67af20b30c9ab90ab297c1036b8d1",
-        serverUrls: blossomServers,
-      );
-
-      print(response);
-    } catch (e) {
-      print(e);
-    }
   }
 
   void createFolder(String name, {String destPath = "/"}) async {
@@ -284,10 +253,7 @@ class DriveService {
           driveEvents.where((e) => e.tags[1] == entity.tags[1]).length;
 
       if (fileRefCount == 1) {
-        ndk.blossom.deleteBlob(
-          sha256: entity.tags[1],
-          serverUrls: blossomServers,
-        );
+        ndk.blossom.deleteBlob(sha256: entity.tags[1]);
       }
     }
 

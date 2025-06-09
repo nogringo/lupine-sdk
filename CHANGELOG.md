@@ -1,3 +1,1 @@
-## 1.0.1
-
-- Add file from bytes
+## 1.0.2

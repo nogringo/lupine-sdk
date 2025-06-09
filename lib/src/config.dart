@@ -1,3 +1,8 @@
 int driveKind = 40000;
 String trashPath = "/Trash_06310831";
-List<String> blossomServers = ["http://localhost:3000"];
+const bootstrapRelays = [
+  "wss://relay.primal.net",
+  "wss://relay.damus.io",
+  "wss://nos.lol",
+  "wss://purplepag.es",
+];
