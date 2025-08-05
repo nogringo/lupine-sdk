@@ -19,7 +19,8 @@ class DriveItemFactory {
           path: decryptedContent['path'] as String,
           size: decryptedContent['size'] as int,
           fileType: decryptedContent['file-type'] as String,
-          encryptionAlgorithm: decryptedContent['encryption-algorithm'] as String?,
+          encryptionAlgorithm:
+              decryptedContent['encryption-algorithm'] as String?,
           decryptionKey: decryptedContent['decryption-key'] as String?,
           decryptionNonce: decryptedContent['decryption-nonce'] as String?,
           createdAt: DateTime.fromMillisecondsSinceEpoch(createdAt * 1000),

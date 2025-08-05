@@ -1,8 +1,9 @@
+import 'dart:convert';
 import 'package:lupine_sdk/lupine_sdk.dart';
 import 'package:nip01/nip01.dart';
 import 'package:nip19/nip19.dart';
 import 'package:test/test.dart';
-import 'package:sembast/sembast_memory.dart';
+import 'package:sembast/sembast_memory.dart' as sembast;
 import 'package:ndk/ndk.dart';
 
 void main() {
@@ -10,19 +11,19 @@ void main() {
     // const blossomServerUrl = "http://localhost:3001";
 
     late DriveService driveService;
-    late Database db;
+    late sembast.Database db;
     late Ndk ndk;
 
     setUp(() async {
       // Create in-memory database for testing
-      db = await databaseFactoryMemory.openDatabase('test.db');
+      db = await sembast.databaseFactoryMemory.openDatabase('test.db');
 
       // Create mock NDK instance
       ndk = Ndk(
         NdkConfig(
           eventVerifier: Bip340EventVerifier(),
           cache: MemCacheManager(),
-          bootstrapRelays: ["ws://localhost:7777"],
+          bootstrapRelays: ["wss://relay.primal.net"],
         ),
       );
 
@@ -154,6 +155,229 @@ void main() {
         () => driveService.list('Documents'),
         throwsA(isA<ArgumentError>()),
       );
+    });
+
+    test('should store events on relays', () async {
+      // Create a unique test folder
+      final testPath = '/RelayTest_${DateTime.now().millisecondsSinceEpoch}';
+      await driveService.createFolder(testPath);
+
+      // Wait a bit for the event to be broadcast
+      await Future.delayed(Duration(milliseconds: 500));
+
+      // Query the relay directly for our event
+      final account = ndk.accounts.getLoggedAccount()!;
+      final filter = Filter(
+        kinds: const [9500],
+        authors: [account.pubkey],
+        limit: 10,
+      );
+
+      final events = ndk.requests.query(filters: [filter]);
+
+      // Find our test event
+      bool foundTestEvent = false;
+      await for (final event in events.stream) {
+        try {
+          // Try to decrypt the content
+          final decrypted = await account.signer.decryptNip44(
+            ciphertext: event.content,
+            senderPubKey: account.pubkey,
+          );
+
+          if (decrypted != null) {
+            final content = jsonDecode(decrypted);
+            if (content['path'] == testPath) {
+              foundTestEvent = true;
+
+              // Verify event structure
+              expect(event.kind, equals(9500));
+              expect(event.pubKey, equals(account.pubkey));
+              expect(content['type'], equals('folder'));
+              break;
+            }
+          }
+        } catch (e) {
+          // Skip events we can't decrypt
+          continue;
+        }
+      }
+
+      expect(foundTestEvent, isTrue, reason: 'Event should be stored on relay');
+    });
+  });
+
+  group('SyncManager', () {
+    late DriveService driveService1;
+    late DriveService driveService2;
+    late sembast.Database db1;
+    late sembast.Database db2;
+    late Ndk ndk1;
+    late Ndk ndk2;
+
+    setUp(() async {
+      // Create two separate instances to simulate different devices
+      db1 = await sembast.databaseFactoryMemory.openDatabase('test1.db');
+      db2 = await sembast.databaseFactoryMemory.openDatabase('test2.db');
+
+      // Create NDK instances with same account
+      final privkey = Nip19.nsecToHex(
+        "nsec1ulevffshaykkq46yyedc5c78svemvk2qcc48azpmdlszc3rf233sz9vd53",
+      );
+      final keyPair = KeyPair.fromPrivateKey(privateKey: privkey);
+
+      ndk1 = Ndk(
+        NdkConfig(
+          eventVerifier: Bip340EventVerifier(),
+          cache: MemCacheManager(),
+          bootstrapRelays: ["wss://relay.primal.net"],
+        ),
+      );
+      ndk1.accounts.loginPrivateKey(
+        pubkey: keyPair.publicKey,
+        privkey: privkey,
+      );
+
+      ndk2 = Ndk(
+        NdkConfig(
+          eventVerifier: Bip340EventVerifier(),
+          cache: MemCacheManager(),
+          bootstrapRelays: ["wss://relay.primal.net"],
+        ),
+      );
+      ndk2.accounts.loginPrivateKey(
+        pubkey: keyPair.publicKey,
+        privkey: privkey,
+      );
+
+      driveService1 = DriveService(ndk: ndk1, db: db1);
+      driveService2 = DriveService(ndk: ndk2, db: db2);
+    });
+
+    tearDown(() async {
+      driveService1.dispose();
+      driveService2.dispose();
+      await db1.close();
+      await db2.close();
+    });
+
+    test('should sync folders between devices', () async {
+      // Create folder on device 1
+      final testFolder = '/SyncTest_${DateTime.now().millisecondsSinceEpoch}';
+      await driveService1.createFolder(testFolder);
+
+      // Wait for broadcast
+      await Future.delayed(Duration(seconds: 1));
+
+      // Initialize and sync device 2
+      await driveService2.initialize();
+      await driveService2.sync();
+
+      // Wait for sync to complete
+      await Future.delayed(Duration(seconds: 1));
+
+      // Check if folder appears on device 2
+      final items = await driveService2.list('/');
+      final syncedFolder = items.where((item) => item.path == testFolder);
+
+      expect(syncedFolder.length, equals(1));
+      expect(syncedFolder.first.isFolder, isTrue);
+    });
+
+    test('should sync deletions between devices', () async {
+      // Create folder on both devices first
+      final testFolder =
+          '/DeleteSyncTest_${DateTime.now().millisecondsSinceEpoch}';
+
+      // Create on device 1
+      await driveService1.createFolder(testFolder);
+      await Future.delayed(Duration(seconds: 1));
+
+      // Sync to device 2
+      await driveService2.initialize();
+      await driveService2.sync();
+      await Future.delayed(Duration(seconds: 1));
+
+      // Verify it exists on device 2
+      var items = await driveService2.list('/');
+      expect(items.any((item) => item.path == testFolder), isTrue);
+
+      // Delete on device 1
+      await driveService1.deleteByPath(testFolder);
+      await Future.delayed(Duration(seconds: 1));
+
+      // Sync device 2 again
+      await driveService2.sync();
+      await Future.delayed(Duration(seconds: 1));
+
+      // Verify it's deleted on device 2
+      items = await driveService2.list('/');
+      expect(items.any((item) => item.path == testFolder), isFalse);
+    });
+
+    test('should emit change events during sync', () async {
+      // Initialize device 2 first to ensure subscription works
+      await driveService2.initialize();
+
+      // Listen for changes on device 2
+      final changes = <DriveChangeEvent>[];
+      final subscription = driveService2.changes.listen(changes.add);
+
+      // Create multiple items on device 1
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      await driveService1.createFolder('/ChangeTest1_$timestamp');
+      await driveService1.createFolder('/ChangeTest2_$timestamp');
+
+      await Future.delayed(Duration(seconds: 1));
+
+      // Sync device 2 to receive the new items
+      await driveService2.sync();
+
+      await Future.delayed(Duration(seconds: 1));
+
+      // Should have received change events
+      expect(changes.length, greaterThanOrEqualTo(2));
+      expect(changes.every((e) => e.type == 'added'), isTrue);
+
+      await subscription.cancel();
+    });
+
+    test('should handle concurrent modifications', () async {
+      // Create same folder path on both devices
+      final testFolder =
+          '/ConcurrentTest_${DateTime.now().millisecondsSinceEpoch}';
+
+      // Create on both devices without syncing
+      await driveService1.createFolder(testFolder);
+      await driveService2.createFolder(testFolder);
+
+      await Future.delayed(Duration(seconds: 1));
+
+      // Both should sync without errors
+      await driveService1.sync();
+      await driveService2.sync();
+
+      await Future.delayed(Duration(seconds: 1));
+
+      // Both should see the folder
+      final items1 = await driveService1.list('/');
+      final items2 = await driveService2.list('/');
+
+      expect(items1.any((item) => item.path == testFolder), isTrue);
+      expect(items2.any((item) => item.path == testFolder), isTrue);
+    });
+
+    test('should track last sync time', () async {
+      // Initially no sync time
+      expect(driveService2.lastSync, isNull);
+
+      // Initialize and sync
+      await driveService2.initialize();
+      await driveService2.sync();
+
+      // Should have a last sync time
+      expect(driveService2.lastSync, isNotNull);
+      expect(driveService2.lastSync!.isBefore(DateTime.now()), isTrue);
     });
   });
 

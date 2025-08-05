@@ -17,10 +17,7 @@ class FolderMetadata extends DriveItem {
     : createdAt = createdAt ?? DateTime.now();
 
   @override
-  Map<String, dynamic> toJson() => {
-    'type': 'folder',
-    'path': path,
-  };
+  Map<String, dynamic> toJson() => {'type': 'folder', 'path': path};
 
   factory FolderMetadata.fromJson(Map<String, dynamic> json) => FolderMetadata(
     path: json['path'] as String,
