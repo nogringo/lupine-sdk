@@ -4,8 +4,6 @@ class DriveChangeEvent {
   final String? path;
   final DateTime timestamp;
 
-  DriveChangeEvent({
-    required this.type,
-    this.path,
-  }) : timestamp = DateTime.now();
+  DriveChangeEvent({required this.type, this.path})
+    : timestamp = DateTime.now();
 }

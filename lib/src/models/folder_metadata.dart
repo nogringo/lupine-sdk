@@ -20,14 +20,11 @@ class FolderMetadata extends DriveItem {
   Map<String, dynamic> toJson() => {
     'type': 'folder',
     'path': path,
-    'created-at': createdAt.toIso8601String(),
   };
 
   factory FolderMetadata.fromJson(Map<String, dynamic> json) => FolderMetadata(
     path: json['path'] as String,
-    createdAt: json['created-at'] != null
-        ? DateTime.parse(json['created-at'] as String)
-        : DateTime.now(),
+    createdAt: DateTime.now(), // Will be overridden by DriveItemFactory
     eventId: json['eventId'] as String?,
   );
 }

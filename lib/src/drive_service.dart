@@ -311,6 +311,7 @@ class DriveService {
         items.add(item);
       } catch (e) {
         // Skip items that can't be parsed
+        print(e);
         continue;
       }
     }

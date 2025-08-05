@@ -139,7 +139,8 @@ class SyncManager {
       final path = metadata['path'] as String?;
       onDriveChange?.call('added', path);
     } catch (e) {
-      print('Error handling event ${event.id}: $e');
+      // Silently ignore errors in individual events to keep sync running
+      // Could be improved by adding error callback or logging mechanism
     }
   }
 

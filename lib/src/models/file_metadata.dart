@@ -57,9 +57,7 @@ class FileMetadata extends DriveItem {
     encryptionAlgorithm: json['encryption-algorithm'] as String?,
     decryptionKey: json['decryption-key'] as String?,
     decryptionNonce: json['decryption-nonce'] as String?,
-    createdAt: json['created-at'] != null
-        ? DateTime.parse(json['created-at'] as String)
-        : DateTime.now(),
+    createdAt: DateTime.now(), // Will be overridden by DriveItemFactory
     eventId: json['eventId'] as String?,
   );
 }
