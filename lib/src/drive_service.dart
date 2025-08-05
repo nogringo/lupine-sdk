@@ -1,12 +1,14 @@
 import 'dart:convert';
+import 'dart:typed_data';
+import 'package:crypto/crypto.dart';
 
 import 'package:lupine_sdk/src/models/drive_item.dart';
 import 'package:lupine_sdk/src/models/drive_item_factory.dart';
 import 'package:lupine_sdk/src/models/file_metadata.dart';
+import 'package:lupine_sdk/src/utils/crypto_utils.dart';
 import 'package:ndk/ndk.dart';
 import 'package:path/path.dart' as p;
 import 'package:sembast/sembast.dart' as sembast;
-import 'blossom_tracker.dart';
 
 class DriveService {
   final Ndk ndk;
@@ -14,11 +16,8 @@ class DriveService {
   final sembast.StoreRef<String, Map<String, dynamic>> _store = sembast
       .stringMapStoreFactory
       .store('drive_events');
-  late final BlossomTracker blossomTracker;
 
-  DriveService({required this.ndk, required this.db}) {
-    blossomTracker = BlossomTracker(db: db);
-  }
+  DriveService({required this.ndk, required this.db});
 
   // Create a new folder
   Future<void> createFolder(String path) async {
@@ -79,10 +78,106 @@ class DriveService {
   }
 
   // Upload a file
-  Future<Nip01Event> uploadFile({
-    
+  // NOTE: Due to NDK limitations, this method loads the entire file into memory
+  // Not suitable for files larger than available RAM
+  Future<FileMetadata> uploadFile({
+    required Uint8List fileData,
+    required String path,
+    required String fileType,
+    bool encrypt = true,
   }) async {
-    // TODO: Implement
+    // Normalize path
+    path = p.normalize(path);
+
+    // Validate path is absolute
+    if (!p.isAbsolute(path)) {
+      throw ArgumentError('Path must be absolute (start with /)');
+    }
+
+    final account = ndk.accounts.getLoggedAccount();
+    if (account == null) {
+      throw Exception('User not logged in');
+    }
+
+    String? encryptionAlgorithm;
+    String? decryptionKey;
+    String? decryptionNonce;
+
+    Uint8List processedData = fileData;
+
+    if (encrypt) {
+      // Generate random key and nonce for AES-GCM
+      final key = generateRandomBytes(32); // 256-bit key
+      final nonce = generateRandomBytes(12); // 96-bit nonce
+
+      // Encrypt the file data
+      processedData = encryptAesGcm(fileData, key, nonce);
+
+      encryptionAlgorithm = 'aes-gcm';
+      decryptionKey = base64Encode(key);
+      decryptionNonce = base64Encode(nonce);
+    }
+
+    // Calculate hash of processed (potentially encrypted) data
+    final hash = sha256.convert(processedData).toString();
+    final size = processedData.length;
+
+    // Upload to Blossom servers via NDK
+    await ndk.blossom.uploadBlob(data: processedData);
+
+    // Create file metadata
+    final fileMetadata = {
+      'type': 'file',
+      'hash': hash,
+      'path': path,
+      'size': size,
+      'file-type': fileType,
+      if (encryptionAlgorithm != null)
+        'encryption-algorithm': encryptionAlgorithm,
+      if (decryptionKey != null) 'decryption-key': decryptionKey,
+      if (decryptionNonce != null) 'decryption-nonce': decryptionNonce,
+    };
+
+    // Encrypt the metadata
+    final content = jsonEncode(fileMetadata);
+    final encryptedContent = await account.signer.encryptNip44(
+      plaintext: content,
+      recipientPubKey: account.pubkey,
+    );
+
+    if (encryptedContent == null) {
+      throw Exception('Failed to encrypt content');
+    }
+
+    // Create the event
+    final event = Nip01Event(
+      pubKey: account.pubkey,
+      kind: 9500,
+      content: encryptedContent,
+      tags: [],
+    );
+
+    // Store in local database
+    await _store.record(event.id).put(db, {
+      'nostrEvent': event.toJson(),
+      'decryptedContent': fileMetadata,
+    });
+
+    // Broadcast the event
+    ndk.broadcast.broadcast(nostrEvent: event);
+
+    // Return the created file metadata
+    return FileMetadata(
+      hash: hash,
+      path: path,
+      size: size,
+      fileType: fileType,
+      encryptionAlgorithm: encryptionAlgorithm,
+      decryptionKey: decryptionKey,
+      decryptionNonce: decryptionNonce,
+      createdAt: DateTime.fromMillisecondsSinceEpoch(event.createdAt * 1000),
+      eventId: event.id,
+    );
   }
 
   // List files and folders
@@ -136,11 +231,6 @@ class DriveService {
 
     return items;
   }
-
-  // // Get file or folder metadata
-  // Future<Map<String, dynamic>?> getMetadata(String path) async {
-  //   // TODO: Implement
-  // }
 
   // Delete file or folder
   Future<void> deleteById(String eventId) async {
@@ -232,25 +322,6 @@ class DriveService {
     // Delete the folder/file itself
     await deleteById(record.key);
   }
-
-  // // Share file with another user
-  // Future<Nip01Event> shareFile({
-  //   required String hash,
-  //   required String path,
-  //   required int size,
-  //   required String fileType,
-  //   required String recipientPubkey,
-  //   String? encryptionAlgorithm,
-  //   String? decryptionKey,
-  //   String? decryptionNonce,
-  // }) async {
-  //   // TODO: Implement
-  // }
-
-  // // Get shared files
-  // Future<List<Map<String, dynamic>>> getSharedFiles() async {
-  //   // TODO: Implement
-  // }
 
   // Get file versions
   Future<List<FileMetadata>> getFileVersions(String path) async {
