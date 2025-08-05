@@ -323,6 +323,27 @@ class DriveService {
     await deleteById(record.key);
   }
 
+  // Download a file from Blossom servers
+  Future<Uint8List> downloadFile({
+    required String hash,
+    String? decryptionKey,
+    String? decryptionNonce,
+  }) async {
+    // Download from Blossom servers
+    final response = await ndk.blossom.getBlob(sha256: hash);
+
+    final encryptedData = response.data;
+
+    // Decrypt if keys provided (file was encrypted)
+    if (decryptionKey != null && decryptionNonce != null) {
+      final key = base64Decode(decryptionKey);
+      final nonce = base64Decode(decryptionNonce);
+      return decryptAesGcm(encryptedData, key, nonce);
+    }
+
+    return encryptedData;
+  }
+
   // Get file versions
   Future<List<FileMetadata>> getFileVersions(String path) async {
     // Normalize path
