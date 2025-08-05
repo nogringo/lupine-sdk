@@ -1,10 +1,13 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 
+import 'package:lupine_sdk/src/models/drive_change_event.dart';
 import 'package:lupine_sdk/src/models/drive_item.dart';
 import 'package:lupine_sdk/src/models/drive_item_factory.dart';
 import 'package:lupine_sdk/src/models/file_metadata.dart';
+import 'package:lupine_sdk/src/sync_manager.dart';
 import 'package:lupine_sdk/src/utils/crypto_utils.dart';
 import 'package:ndk/ndk.dart';
 import 'package:path/path.dart' as p;
@@ -16,8 +19,85 @@ class DriveService {
   final sembast.StoreRef<String, Map<String, dynamic>> _store = sembast
       .stringMapStoreFactory
       .store('drive_events');
+  late final SyncManager _syncManager;
 
-  DriveService({required this.ndk, required this.db});
+  // Stream controller for drive changes
+  final _changeController = StreamController<DriveChangeEvent>.broadcast();
+
+  // Public stream for UI updates
+  Stream<DriveChangeEvent> get changes => _changeController.stream;
+
+  DriveService({required this.ndk, required this.db}) {
+    _syncManager = SyncManager(
+      ndk: ndk,
+      db: db,
+      onDriveChange: (type, path) {
+        _changeController.add(DriveChangeEvent(type: type, path: path));
+      },
+    );
+  }
+
+  // Initialize the drive service and start syncing
+  Future<void> initialize() async {
+    await _syncManager.startSync();
+  }
+
+  // Stop syncing and clean up resources
+  void dispose() {
+    _syncManager.dispose();
+    _changeController.close();
+  }
+
+  // Get sync status
+  bool get isSyncing => _syncManager.isSyncing;
+  DateTime? get lastSync => _syncManager.lastSync;
+
+  // Force a manual sync
+  Future<void> sync() async {
+    await _syncManager.syncNow();
+    await _syncManager.syncDeletions();
+  }
+
+  // Helper to create filter that includes both our files and shared files
+  sembast.Filter _createAccessibleFilesFilter() {
+    final account = ndk.accounts.getLoggedAccount();
+    if (account == null) {
+      return sembast.Filter.equals(
+        'nostrEvent.pubkey',
+        '',
+      ); // Will match nothing
+    }
+
+    // Include files where:
+    // 1. We are the author (our own files)
+    // 2. OR we can decrypt them (shared with us)
+    // Since we store decrypted content, if it's in our DB, we have access
+    return sembast.Filter.custom((record) {
+      final nostrEvent = record['nostrEvent'] as Map<String, dynamic>?;
+      if (nostrEvent == null) return false;
+
+      final pubkey = nostrEvent['pubkey'] as String?;
+      if (pubkey == null) return false;
+
+      // Our own files
+      if (pubkey == account.pubkey) return true;
+
+      // Shared files - check if we're tagged
+      final tags = nostrEvent['tags'] as List<dynamic>?;
+      if (tags != null) {
+        for (final tag in tags) {
+          if (tag is List &&
+              tag.length >= 2 &&
+              tag[0] == 'p' &&
+              tag[1] == account.pubkey) {
+            return true;
+          }
+        }
+      }
+
+      return false;
+    });
+  }
 
   // Create a new folder
   Future<void> createFolder(String path) async {
@@ -75,6 +155,9 @@ class DriveService {
     });
 
     ndk.broadcast.broadcast(nostrEvent: event);
+
+    // Notify listeners about the new folder
+    _changeController.add(DriveChangeEvent(type: 'added', path: path));
   }
 
   // Upload a file
@@ -194,26 +277,29 @@ class DriveService {
     final records = await _store.find(
       db,
       finder: sembast.Finder(
-        filter: sembast.Filter.custom((record) {
-          final decryptedContent =
-              record['decryptedContent'] as Map<String, dynamic>?;
-          if (decryptedContent == null) return false;
+        filter: sembast.Filter.and([
+          _createAccessibleFilesFilter(), // Include both owned and shared files
+          sembast.Filter.custom((record) {
+            final decryptedContent =
+                record['decryptedContent'] as Map<String, dynamic>?;
+            if (decryptedContent == null) return false;
 
-          final itemPath = decryptedContent['path'] as String?;
-          if (itemPath == null) return false;
+            final itemPath = decryptedContent['path'] as String?;
+            if (itemPath == null) return false;
 
-          // Check if item is in the requested directory
-          final itemDir = p.dirname(itemPath);
+            // Check if item is in the requested directory
+            final itemDir = p.dirname(itemPath);
 
-          // For root directory
-          if (path == '/') {
-            // Item should be in root (dirname should be '/')
-            return itemDir == '/';
-          }
+            // For root directory
+            if (path == '/') {
+              // Item should be in root (dirname should be '/')
+              return itemDir == '/';
+            }
 
-          // For other directories, check if item's parent is the requested path
-          return itemDir == path;
-        }),
+            // For other directories, check if item's parent is the requested path
+            return itemDir == path;
+          }),
+        ]),
       ),
     );
 
@@ -274,13 +360,16 @@ class DriveService {
       throw Exception('User not logged in');
     }
 
-    // Find the event by path
+    // Find the event by path (only allow deleting our own files)
     final records = await _store.find(
       db,
       finder: sembast.Finder(
         filter: sembast.Filter.and([
           sembast.Filter.equals('decryptedContent.path', path),
-          sembast.Filter.equals('nostrEvent.pubkey', account.pubkey),
+          sembast.Filter.equals(
+            'nostrEvent.pubkey',
+            account.pubkey,
+          ), // Only delete our own
         ]),
       ),
     );
@@ -359,14 +448,14 @@ class DriveService {
       throw Exception('User not logged in');
     }
 
-    // Find all file events with the same path from the current user
+    // Find all file events with the same path (including shared)
     final records = await _store.find(
       db,
       finder: sembast.Finder(
         filter: sembast.Filter.and([
           sembast.Filter.equals('decryptedContent.path', path),
           sembast.Filter.equals('decryptedContent.type', 'file'),
-          sembast.Filter.equals('nostrEvent.pubkey', account.pubkey),
+          _createAccessibleFilesFilter(), // Include both owned and shared
         ]),
       ),
     );
@@ -408,13 +497,16 @@ class DriveService {
       throw Exception('User not logged in');
     }
 
-    // Find the most recent event for the old path
+    // Find the most recent event for the old path (only allow moving our own files)
     final records = await _store.find(
       db,
       finder: sembast.Finder(
         filter: sembast.Filter.and([
           sembast.Filter.equals('decryptedContent.path', oldPath),
-          sembast.Filter.equals('nostrEvent.pubkey', account.pubkey),
+          sembast.Filter.equals(
+            'nostrEvent.pubkey',
+            account.pubkey,
+          ), // Only move our own
         ]),
       ),
     );
@@ -642,7 +734,7 @@ class DriveService {
       db,
       finder: sembast.Finder(
         filter: sembast.Filter.and([
-          sembast.Filter.equals('nostrEvent.pubkey', account.pubkey),
+          _createAccessibleFilesFilter(), // Include both owned and shared
           sembast.Filter.custom((record) {
             final content = record['decryptedContent'] as Map<String, dynamic>?;
             if (content == null) return false;
