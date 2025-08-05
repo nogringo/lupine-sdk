@@ -1,0 +1,600 @@
+import 'dart:convert';
+
+import 'package:lupine_sdk/src/models/drive_item.dart';
+import 'package:lupine_sdk/src/models/drive_item_factory.dart';
+import 'package:lupine_sdk/src/models/file_metadata.dart';
+import 'package:ndk/ndk.dart';
+import 'package:path/path.dart' as p;
+import 'package:sembast/sembast.dart' as sembast;
+import 'blossom_tracker.dart';
+
+class DriveService {
+  final Ndk ndk;
+  final sembast.Database db;
+  final sembast.StoreRef<String, Map<String, dynamic>> _store = sembast
+      .stringMapStoreFactory
+      .store('drive_events');
+  late final BlossomTracker blossomTracker;
+
+  DriveService({required this.ndk, required this.db}) {
+    blossomTracker = BlossomTracker(db: db);
+  }
+
+  // Create a new folder
+  Future<void> createFolder(String path) async {
+    // Normalize path using path package
+    path = p.normalize(path);
+
+    // Validate path is absolute
+    if (!p.isAbsolute(path)) {
+      throw ArgumentError('Path must be absolute (start with /)');
+    }
+
+    final account = ndk.accounts.getLoggedAccount();
+    if (account == null) {
+      throw Exception('User not logged in');
+    }
+
+    final pubkey = account.pubkey;
+
+    // Check if folder already exists
+    final existingRecords = await _store.find(
+      db,
+      finder: sembast.Finder(
+        filter: sembast.Filter.and([
+          sembast.Filter.equals('decryptedContent.type', 'folder'),
+          sembast.Filter.equals('decryptedContent.path', path),
+        ]),
+      ),
+    );
+
+    if (existingRecords.isNotEmpty) return;
+
+    final folderData = {'type': 'folder', 'path': path};
+
+    final content = jsonEncode(folderData);
+    final encryptedContent = await account.signer.encryptNip44(
+      plaintext: content,
+      recipientPubKey: pubkey,
+    );
+
+    if (encryptedContent == null) {
+      throw Exception('Failed to encrypt content');
+    }
+
+    final event = Nip01Event(
+      pubKey: pubkey,
+      kind: 9500,
+      content: encryptedContent,
+      tags: [],
+    );
+
+    // Store the unencrypted folder data in local database
+    await _store.record(event.id).put(db, {
+      'nostrEvent': event.toJson(),
+      'decryptedContent': folderData,
+    });
+
+    ndk.broadcast.broadcast(nostrEvent: event);
+  }
+
+  // Upload a file
+  Future<Nip01Event> uploadFile({
+    
+  }) async {
+    // TODO: Implement
+  }
+
+  // List files and folders
+  Future<List<DriveItem>> list(String path) async {
+    // Normalize path using path package
+    path = p.normalize(path);
+
+    // Validate path is absolute
+    if (!p.isAbsolute(path)) {
+      throw ArgumentError('Path must be absolute (start with /)');
+    }
+
+    // Find all items in the directory from local database
+    final records = await _store.find(
+      db,
+      finder: sembast.Finder(
+        filter: sembast.Filter.custom((record) {
+          final decryptedContent =
+              record['decryptedContent'] as Map<String, dynamic>?;
+          if (decryptedContent == null) return false;
+
+          final itemPath = decryptedContent['path'] as String?;
+          if (itemPath == null) return false;
+
+          // Check if item is in the requested directory
+          final itemDir = p.dirname(itemPath);
+
+          // For root directory
+          if (path == '/') {
+            // Item should be in root (dirname should be '/')
+            return itemDir == '/';
+          }
+
+          // For other directories, check if item's parent is the requested path
+          return itemDir == path;
+        }),
+      ),
+    );
+
+    // Convert records to list of DriveItem objects
+    final items = <DriveItem>[];
+    for (final record in records) {
+      try {
+        final item = DriveItemFactory.fromJson(record.value);
+        items.add(item);
+      } catch (e) {
+        // Skip items that can't be parsed
+        continue;
+      }
+    }
+
+    return items;
+  }
+
+  // // Get file or folder metadata
+  // Future<Map<String, dynamic>?> getMetadata(String path) async {
+  //   // TODO: Implement
+  // }
+
+  // Delete file or folder
+  Future<void> deleteById(String eventId) async {
+    final account = ndk.accounts.getLoggedAccount();
+    if (account == null) {
+      throw Exception('User not logged in');
+    }
+
+    // Verify the event exists and user owns it
+    final record = await _store.record(eventId).get(db);
+    if (record == null) return;
+
+    final nostrEvent = record['nostrEvent'] as Map<String, dynamic>;
+    final eventPubkey = nostrEvent['pubkey'] as String?;
+
+    if (eventPubkey != account.pubkey) {
+      throw Exception(
+        'Unauthorized: You can only delete your own files/folders',
+      );
+    }
+
+    // Remove from local database
+    await _store.record(eventId).delete(db);
+
+    // Broadcast deletion event
+    ndk.broadcast.broadcastDeletion(eventId: eventId);
+  }
+
+  // Delete file or folder by path
+  Future<void> deleteByPath(String path) async {
+    // Normalize path
+    path = p.normalize(path);
+
+    // Validate path is absolute
+    if (!p.isAbsolute(path)) {
+      throw ArgumentError('Path must be absolute (start with /)');
+    }
+
+    final account = ndk.accounts.getLoggedAccount();
+    if (account == null) {
+      throw Exception('User not logged in');
+    }
+
+    // Find the event by path
+    final records = await _store.find(
+      db,
+      finder: sembast.Finder(
+        filter: sembast.Filter.and([
+          sembast.Filter.equals('decryptedContent.path', path),
+          sembast.Filter.equals('nostrEvent.pubkey', account.pubkey),
+        ]),
+      ),
+    );
+
+    if (records.isEmpty) return;
+
+    // Check if it's a folder
+    final record = records.last;
+    final decryptedContent =
+        record.value['decryptedContent'] as Map<String, dynamic>;
+    final isFolder = decryptedContent['type'] == 'folder';
+
+    if (isFolder) {
+      // Find all items that start with this folder path
+      final childRecords = await _store.find(
+        db,
+        finder: sembast.Finder(
+          filter: sembast.Filter.and([
+            sembast.Filter.custom((record) {
+              final content =
+                  record['decryptedContent'] as Map<String, dynamic>?;
+              if (content == null) return false;
+              final itemPath = content['path'] as String?;
+              if (itemPath == null) return false;
+              // Check if item is inside the folder being deleted
+              return itemPath.startsWith('$path/');
+            }),
+            sembast.Filter.equals('nostrEvent.pubkey', account.pubkey),
+          ]),
+        ),
+      );
+
+      // Delete all children first (files and subfolders)
+      for (final childRecord in childRecords) {
+        await deleteById(childRecord.key);
+      }
+    }
+
+    // Delete the folder/file itself
+    await deleteById(record.key);
+  }
+
+  // // Share file with another user
+  // Future<Nip01Event> shareFile({
+  //   required String hash,
+  //   required String path,
+  //   required int size,
+  //   required String fileType,
+  //   required String recipientPubkey,
+  //   String? encryptionAlgorithm,
+  //   String? decryptionKey,
+  //   String? decryptionNonce,
+  // }) async {
+  //   // TODO: Implement
+  // }
+
+  // // Get shared files
+  // Future<List<Map<String, dynamic>>> getSharedFiles() async {
+  //   // TODO: Implement
+  // }
+
+  // Get file versions
+  Future<List<FileMetadata>> getFileVersions(String path) async {
+    // Normalize path
+    path = p.normalize(path);
+
+    // Validate path is absolute
+    if (!p.isAbsolute(path)) {
+      throw ArgumentError('Path must be absolute (start with /)');
+    }
+
+    final account = ndk.accounts.getLoggedAccount();
+    if (account == null) {
+      throw Exception('User not logged in');
+    }
+
+    // Find all file events with the same path from the current user
+    final records = await _store.find(
+      db,
+      finder: sembast.Finder(
+        filter: sembast.Filter.and([
+          sembast.Filter.equals('decryptedContent.path', path),
+          sembast.Filter.equals('decryptedContent.type', 'file'),
+          sembast.Filter.equals('nostrEvent.pubkey', account.pubkey),
+        ]),
+      ),
+    );
+
+    final versions = <FileMetadata>[];
+
+    for (final record in records) {
+      try {
+        // Use the factory to parse the record
+        final item = DriveItemFactory.fromJson(record.value);
+        if (item is FileMetadata) {
+          versions.add(item);
+        }
+      } catch (e) {
+        // Skip items that can't be parsed
+        continue;
+      }
+    }
+
+    // Sort by creation time (newest first)
+    versions.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+    return versions;
+  }
+
+  // Move/rename file or folder
+  Future<void> move({required String oldPath, required String newPath}) async {
+    // Normalize paths
+    oldPath = p.normalize(oldPath);
+    newPath = p.normalize(newPath);
+
+    // Validate paths are absolute
+    if (!p.isAbsolute(oldPath) || !p.isAbsolute(newPath)) {
+      throw ArgumentError('Paths must be absolute (start with /)');
+    }
+
+    final account = ndk.accounts.getLoggedAccount();
+    if (account == null) {
+      throw Exception('User not logged in');
+    }
+
+    // Find the most recent event for the old path
+    final records = await _store.find(
+      db,
+      finder: sembast.Finder(
+        filter: sembast.Filter.and([
+          sembast.Filter.equals('decryptedContent.path', oldPath),
+          sembast.Filter.equals('nostrEvent.pubkey', account.pubkey),
+        ]),
+      ),
+    );
+
+    if (records.isEmpty) {
+      throw Exception('File or folder not found at path: $oldPath');
+    }
+
+    // Get the most recent record
+    records.sort((a, b) {
+      final aCreatedAt = (a.value['nostrEvent'] as Map)['created_at'] as int;
+      final bCreatedAt = (b.value['nostrEvent'] as Map)['created_at'] as int;
+      return bCreatedAt.compareTo(aCreatedAt);
+    });
+
+    final latestRecord = records.first;
+    final decryptedContent = Map<String, dynamic>.from(
+      latestRecord.value['decryptedContent'] as Map<String, dynamic>,
+    );
+
+    // Update the path
+    decryptedContent['path'] = newPath;
+
+    // Create new event with updated path
+    final content = jsonEncode(decryptedContent);
+    final encryptedContent = await account.signer.encryptNip44(
+      plaintext: content,
+      recipientPubKey: account.pubkey,
+    );
+
+    if (encryptedContent == null) {
+      throw Exception('Failed to encrypt content');
+    }
+
+    final event = Nip01Event(
+      pubKey: account.pubkey,
+      kind: 9500,
+      content: encryptedContent,
+      tags: [],
+    );
+
+    // Store in local database
+    await _store.record(event.id).put(db, {
+      'nostrEvent': event.toJson(),
+      'decryptedContent': decryptedContent,
+    });
+
+    // Delete the old entry
+    await deleteById(latestRecord.key);
+
+    // If it's a folder, also move all children
+    if (decryptedContent['type'] == 'folder') {
+      await _moveChildren(oldPath, newPath, account);
+    }
+
+    // Broadcast the new event
+    ndk.broadcast.broadcast(nostrEvent: event);
+  }
+
+  // Helper method to move all children of a folder
+  Future<void> _moveChildren(
+    String oldPath,
+    String newPath,
+    Account account,
+  ) async {
+    final childRecords = await _store.find(
+      db,
+      finder: sembast.Finder(
+        filter: sembast.Filter.and([
+          sembast.Filter.custom((record) {
+            final content = record['decryptedContent'] as Map<String, dynamic>?;
+            if (content == null) return false;
+            final itemPath = content['path'] as String?;
+            if (itemPath == null) return false;
+            return itemPath.startsWith('$oldPath/');
+          }),
+          sembast.Filter.equals('nostrEvent.pubkey', account.pubkey),
+        ]),
+      ),
+    );
+
+    for (final childRecord in childRecords) {
+      final childContent =
+          childRecord.value['decryptedContent'] as Map<String, dynamic>;
+      final childPath = childContent['path'] as String;
+
+      // Replace the old parent path with the new one
+      final newChildPath = childPath.replaceFirst(oldPath, newPath);
+
+      // Recursively move each child
+      await move(oldPath: childPath, newPath: newChildPath);
+    }
+  }
+
+  // Copy file or folder
+  Future<void> copy({
+    required String sourcePath,
+    required String destinationPath,
+  }) async {
+    // Normalize paths
+    sourcePath = p.normalize(sourcePath);
+    destinationPath = p.normalize(destinationPath);
+
+    // Validate paths are absolute
+    if (!p.isAbsolute(sourcePath) || !p.isAbsolute(destinationPath)) {
+      throw ArgumentError('Paths must be absolute (start with /)');
+    }
+
+    final account = ndk.accounts.getLoggedAccount();
+    if (account == null) {
+      throw Exception('User not logged in');
+    }
+
+    // Find the most recent event for the source path
+    final records = await _store.find(
+      db,
+      finder: sembast.Finder(
+        filter: sembast.Filter.and([
+          sembast.Filter.equals('decryptedContent.path', sourcePath),
+          sembast.Filter.equals('nostrEvent.pubkey', account.pubkey),
+        ]),
+      ),
+    );
+
+    if (records.isEmpty) {
+      throw Exception('File or folder not found at path: $sourcePath');
+    }
+
+    // Get the most recent record
+    records.sort((a, b) {
+      final aCreatedAt = (a.value['nostrEvent'] as Map)['created_at'] as int;
+      final bCreatedAt = (b.value['nostrEvent'] as Map)['created_at'] as int;
+      return bCreatedAt.compareTo(aCreatedAt);
+    });
+
+    final sourceRecord = records.first;
+    final sourceContent = Map<String, dynamic>.from(
+      sourceRecord.value['decryptedContent'] as Map<String, dynamic>,
+    );
+
+    // Create a copy with the new path
+    final copiedContent = Map<String, dynamic>.from(sourceContent);
+    copiedContent['path'] = destinationPath;
+
+    // Create new event for the copy
+    final content = jsonEncode(copiedContent);
+    final encryptedContent = await account.signer.encryptNip44(
+      plaintext: content,
+      recipientPubKey: account.pubkey,
+    );
+
+    if (encryptedContent == null) {
+      throw Exception('Failed to encrypt content');
+    }
+
+    final event = Nip01Event(
+      pubKey: account.pubkey,
+      kind: 9500,
+      content: encryptedContent,
+      tags: [],
+    );
+
+    // Store in local database
+    await _store.record(event.id).put(db, {
+      'nostrEvent': event.toJson(),
+      'decryptedContent': copiedContent,
+    });
+
+    // If it's a folder, also copy all children
+    if (copiedContent['type'] == 'folder') {
+      await _copyChildren(sourcePath, destinationPath, account);
+    }
+
+    // Broadcast the new event
+    ndk.broadcast.broadcast(nostrEvent: event);
+  }
+
+  // Helper method to copy all children of a folder
+  Future<void> _copyChildren(
+    String sourcePath,
+    String destinationPath,
+    Account account,
+  ) async {
+    final childRecords = await _store.find(
+      db,
+      finder: sembast.Finder(
+        filter: sembast.Filter.and([
+          sembast.Filter.custom((record) {
+            final content = record['decryptedContent'] as Map<String, dynamic>?;
+            if (content == null) return false;
+            final itemPath = content['path'] as String?;
+            if (itemPath == null) return false;
+            return itemPath.startsWith('$sourcePath/');
+          }),
+          sembast.Filter.equals('nostrEvent.pubkey', account.pubkey),
+        ]),
+      ),
+    );
+
+    for (final childRecord in childRecords) {
+      final childContent =
+          childRecord.value['decryptedContent'] as Map<String, dynamic>;
+      final childPath = childContent['path'] as String;
+
+      // Replace the source parent path with the destination
+      final newChildPath = childPath.replaceFirst(sourcePath, destinationPath);
+
+      // Recursively copy each child
+      await copy(sourcePath: childPath, destinationPath: newChildPath);
+    }
+  }
+
+  // Search files and folders
+  Future<List<DriveItem>> search(String query) async {
+    final account = ndk.accounts.getLoggedAccount();
+    if (account == null) {
+      throw Exception('User not logged in');
+    }
+
+    // Convert query to lowercase for case-insensitive search
+    final lowerQuery = query.toLowerCase();
+
+    // Find all records that match the search query
+    final records = await _store.find(
+      db,
+      finder: sembast.Finder(
+        filter: sembast.Filter.and([
+          sembast.Filter.equals('nostrEvent.pubkey', account.pubkey),
+          sembast.Filter.custom((record) {
+            final content = record['decryptedContent'] as Map<String, dynamic>?;
+            if (content == null) return false;
+
+            final path = content['path'] as String?;
+            if (path == null) return false;
+
+            // Search in path (file/folder name)
+            final fileName = p.basename(path).toLowerCase();
+            if (fileName.contains(lowerQuery)) return true;
+
+            // Search in full path
+            if (path.toLowerCase().contains(lowerQuery)) return true;
+
+            // For files, also search in file type
+            if (content['type'] == 'file') {
+              final fileType = content['file-type'] as String?;
+              if (fileType != null &&
+                  fileType.toLowerCase().contains(lowerQuery)) {
+                return true;
+              }
+            }
+
+            return false;
+          }),
+        ]),
+      ),
+    );
+
+    final results = <DriveItem>[];
+
+    for (final record in records) {
+      try {
+        final item = DriveItemFactory.fromJson(record.value);
+        results.add(item);
+      } catch (e) {
+        // Skip items that can't be parsed
+        continue;
+      }
+    }
+
+    // Sort by path for consistent results
+    results.sort((a, b) => a.path.compareTo(b.path));
+
+    return results;
+  }
+}
