@@ -1,10 +1,10 @@
 # NIP-XX
 
-## Encrypted File Tree Storage
+## Nostr drive
 
 `draft` `optional`
 
-This NIP defines encrypted file tree storage on Nostr using Blossom servers for files and Nostr events for folder structure.
+This NIP defines file tree storage on Nostr using Blossom servers for files and Nostr events for folder structure.
 
 ### Event Structure
 
@@ -19,7 +19,7 @@ Uses kind `9500` for both files and folders.
         "hash": "<sha256>",
         "path": "<absolute-path>",
         "size": "<size-in-bytes>",
-        "file-type": "<file-mime-type>",
+        "file-type": "<file-mime-type>", // optional
         "encryption-algorithm": "<encryption-algorithm>",
         "decryption-key": "<decryption-key>",
         "decryption-nonce": "<decryption-nonce>"
@@ -27,7 +27,7 @@ Uses kind `9500` for both files and folders.
 }
 ```
 
-- `file-type`: Specifies the MIME type of the attached file (e.g., `image/jpeg`, `audio/mpeg`, `application/pdf`, etc.) before encryption.
+- `file-type` (optional): Specifies the MIME type of the attached file (e.g., `image/jpeg`, `audio/mpeg`, `application/pdf`, etc.) before encryption.
 - `encryption-algorithm`: Indicates the encryption algorithm used for encrypting the file. Supported algorithms: `aes-gcm`.
 - `decryption-key`: The decryption key that will be used by the recipient to decrypt the file.
 - `decryption-nonce`: The decryption nonce that will be used by the recipient to decrypt the file.
@@ -80,7 +80,7 @@ File versions are handled by creating new events with the same path but differen
         "hash": "c886c67942...", // new version hash
         "path": "/docs/report.pdf", // same path as original
         "size": 1148576,
-        "file-type": "application/pdf",
+        "file-type": "application/pdf", // optional
     }),
 }
 ```
@@ -112,7 +112,7 @@ File versions are handled by creating new events with the same path but differen
         "hash": "b775b56931...", // hash of encrypted blob
         "path": "/docs/secret.pdf",
         "size": 1048592, // size of encrypted blob
-        "file-type": "application/pdf",
+        "file-type": "application/pdf", // optional
         "encryption-algorithm": "aes-gcm",
         "decryption-key": "base64encodedkey...",
         "decryption-nonce": "base64encodednonce..."

@@ -8,7 +8,8 @@ import 'package:lupine_sdk/src/models/drive_item.dart';
 import 'package:lupine_sdk/src/models/drive_item_factory.dart';
 import 'package:lupine_sdk/src/models/file_metadata.dart';
 import 'package:lupine_sdk/src/sync_manager.dart';
-import 'package:lupine_sdk/src/utils/crypto_utils.dart';
+import 'package:lupine_sdk/src/utils/aes_gcm.dart';
+import 'package:cryptography/cryptography.dart';
 import 'package:ndk/ndk.dart';
 import 'package:path/path.dart' as p;
 import 'package:sembast/sembast.dart' as sembast;
@@ -160,13 +161,38 @@ class DriveService {
     _changeController.add(DriveChangeEvent(type: 'added', path: path));
   }
 
-  // Upload a file
-  // NOTE: Due to NDK limitations, this method loads the entire file into memory
-  // Not suitable for files larger than available RAM
+  /// Uploads a file to the drive service.
+  ///
+  /// This method uploads a file to the decentralized storage system. The file
+  /// can optionally be encrypted before upload for security.
+  ///
+  /// **Note:** Due to NDK limitations, this method loads the entire file into memory.
+  /// Not suitable for files larger than available RAM.
+  ///
+  /// [fileData] - The raw file data as a byte array.
+  /// [path] - The absolute path where the file should be stored (must start with '/').
+  /// [fileType] - Optional MIME type of the file (e.g., 'image/jpeg', 'text/plain').
+  /// [encrypt] - Whether to encrypt the file before uploading. Defaults to `true`.
+  ///
+  /// Returns a [FileMetadata] object containing information about the uploaded file.
+  ///
+  /// Throws:
+  /// - [ArgumentError] if the path is not absolute.
+  /// - [Exception] if the user is not logged in.
+  ///
+  /// Example:
+  /// ```dart
+  /// final metadata = await driveService.uploadFile(
+  ///   fileData: imageBytes,
+  ///   path: '/photos/vacation.jpg',
+  ///   fileType: 'image/jpeg',
+  ///   encrypt: true,
+  /// );
+  /// ```
   Future<FileMetadata> uploadFile({
     required Uint8List fileData,
     required String path,
-    required String fileType,
+    String? fileType,
     bool encrypt = true,
   }) async {
     // Normalize path
@@ -189,15 +215,19 @@ class DriveService {
     Uint8List processedData = fileData;
 
     if (encrypt) {
-      // Generate random key and nonce for AES-GCM
-      final key = generateRandomBytes(32); // 256-bit key
-      final nonce = generateRandomBytes(12); // 96-bit nonce
-
-      // Encrypt the file data
-      processedData = encryptAesGcm(fileData, key, nonce);
-
+      // Encrypt using AESGCMEncryption
+      final aes = AESGCMEncryption();
+      final result = await aes.encryptFile(fileData);
+      
+      processedData = result['encryptedData'] as Uint8List;
+      final key = result['key'] as SecretKey;
+      final nonce = result['nonce'] as List<int>;
+      
+      // Extract key bytes for storage
+      final keyBytes = await key.extractBytes();
+      
       encryptionAlgorithm = 'aes-gcm';
-      decryptionKey = base64Encode(key);
+      decryptionKey = base64Encode(keyBytes);
       decryptionNonce = base64Encode(nonce);
     }
 
@@ -214,7 +244,7 @@ class DriveService {
       'hash': hash,
       'path': path,
       'size': size,
-      'file-type': fileType,
+      if (fileType != null) 'file-type': fileType,
       if (encryptionAlgorithm != null)
         'encryption-algorithm': encryptionAlgorithm,
       if (decryptionKey != null) 'decryption-key': decryptionKey,
@@ -248,6 +278,9 @@ class DriveService {
 
     // Broadcast the event
     ndk.broadcast.broadcast(nostrEvent: event);
+
+    // Notify listeners about the new file
+    _changeController.add(DriveChangeEvent(type: 'added', path: path));
 
     // Return the created file metadata
     return FileMetadata(
@@ -303,11 +336,42 @@ class DriveService {
       ),
     );
 
-    // Convert records to list of DriveItem objects
-    final items = <DriveItem>[];
+    // Group records by path and keep only the latest version
+    final latestByPath = <String, MapEntry<String, Map<String, dynamic>>>{};
+
     for (final record in records) {
+      final decryptedContent =
+          record.value['decryptedContent'] as Map<String, dynamic>?;
+      if (decryptedContent == null) continue;
+
+      final path = decryptedContent['path'] as String?;
+      if (path == null) continue;
+
+      final nostrEvent = record.value['nostrEvent'] as Map<String, dynamic>?;
+      if (nostrEvent == null) continue;
+
+      final createdAt = nostrEvent['created_at'] as int? ?? 0;
+
+      // Check if we already have this path
+      if (latestByPath.containsKey(path)) {
+        final existingCreatedAt =
+            (latestByPath[path]!.value['nostrEvent'] as Map)['created_at']
+                as int? ??
+            0;
+        // Keep the newer version
+        if (createdAt > existingCreatedAt) {
+          latestByPath[path] = MapEntry(record.key, record.value);
+        }
+      } else {
+        latestByPath[path] = MapEntry(record.key, record.value);
+      }
+    }
+
+    // Convert to list of DriveItem objects
+    final items = <DriveItem>[];
+    for (final entry in latestByPath.values) {
       try {
-        final item = DriveItemFactory.fromJson(record.value);
+        final item = DriveItemFactory.fromJson(entry.value);
         items.add(item);
       } catch (e) {
         // Skip items that can't be parsed
@@ -342,8 +406,18 @@ class DriveService {
     // Remove from local database
     await _store.record(eventId).delete(db);
 
+    // Get path for change notification
+    final decryptedContent =
+        record['decryptedContent'] as Map<String, dynamic>?;
+    final path = decryptedContent?['path'] as String?;
+
     // Broadcast deletion event
     ndk.broadcast.broadcastDeletion(eventId: eventId);
+
+    // Notify listeners about the deletion
+    if (path != null) {
+      _changeController.add(DriveChangeEvent(type: 'deleted', path: path));
+    }
   }
 
   // Delete file or folder by path
@@ -411,6 +485,9 @@ class DriveService {
 
     // Delete the folder/file itself
     await deleteById(record.key);
+
+    // Notify listeners about the deletion
+    _changeController.add(DriveChangeEvent(type: 'deleted', path: path));
   }
 
   // Download a file from Blossom servers
@@ -419,16 +496,48 @@ class DriveService {
     String? decryptionKey,
     String? decryptionNonce,
   }) async {
+    final account = ndk.accounts.getLoggedAccount();
+    if (account == null) {
+      throw Exception('User not logged in');
+    }
+
     // Download from Blossom servers
-    final response = await ndk.blossom.getBlob(sha256: hash);
+    final response = await ndk.blossom.getBlob(
+      sha256: hash,
+      pubkeyToFetchUserServerList: account.pubkey,
+    );
 
     final encryptedData = response.data;
 
     // Decrypt if keys provided (file was encrypted)
     if (decryptionKey != null && decryptionNonce != null) {
-      final key = base64Decode(decryptionKey);
-      final nonce = base64Decode(decryptionNonce);
-      return decryptAesGcm(encryptedData, key, nonce);
+      try {
+        final keyBytes = base64Decode(decryptionKey);
+        final nonce = base64Decode(decryptionNonce);
+
+        // Validate key and nonce lengths
+        if (keyBytes.length != 32) {
+          throw Exception(
+            'Invalid key length: ${keyBytes.length} bytes (expected 32)',
+          );
+        }
+        if (nonce.length != 12) {
+          throw Exception(
+            'Invalid nonce length: ${nonce.length} bytes (expected 12)',
+          );
+        }
+
+        // Decrypt using AESGCMEncryption
+        final aes = AESGCMEncryption();
+        final key = SecretKey(keyBytes);
+        return await aes.decryptFile(encryptedData, key, nonce);
+      } catch (e) {
+        throw Exception(
+          'Decryption failed: $e\n'
+          'Data size: ${encryptedData.length} bytes\n'
+          'Hash: $hash',
+        );
+      }
     }
 
     return encryptedData;
@@ -482,7 +591,37 @@ class DriveService {
     return versions;
   }
 
-  // Move/rename file or folder
+  /// Moves or renames a file or folder to a new path.
+  ///
+  /// This method allows you to move items to a different location in the drive
+  /// or rename them by changing their path. The operation creates a new event
+  /// with the updated path while preserving all other metadata.
+  ///
+  /// [oldPath] - The current absolute path of the file or folder to move.
+  /// [newPath] - The new absolute path where the item should be moved.
+  ///
+  /// Both paths must be absolute (starting with '/').
+  ///
+  /// Throws:
+  /// - [ArgumentError] if either path is not absolute.
+  /// - [Exception] if the user is not logged in.
+  /// - [Exception] if the item at [oldPath] is not found.
+  /// - [Exception] if the item doesn't belong to the current user.
+  ///
+  /// Example:
+  /// ```dart
+  /// // Rename a file
+  /// await driveService.move(
+  ///   oldPath: '/documents/draft.txt',
+  ///   newPath: '/documents/final.txt',
+  /// );
+  ///
+  /// // Move a file to a different folder
+  /// await driveService.move(
+  ///   oldPath: '/temp/image.jpg',
+  ///   newPath: '/photos/vacation/image.jpg',
+  /// );
+  /// ```
   Future<void> move({required String oldPath, required String newPath}) async {
     // Normalize paths
     oldPath = p.normalize(oldPath);
@@ -498,7 +637,7 @@ class DriveService {
       throw Exception('User not logged in');
     }
 
-    // Find the most recent event for the old path (only allow moving our own files)
+    // Find ALL versions of the file at the old path (only allow moving our own files)
     final records = await _store.find(
       db,
       finder: sembast.Finder(
@@ -516,55 +655,58 @@ class DriveService {
       throw Exception('File or folder not found at path: $oldPath');
     }
 
-    // Get the most recent record
-    records.sort((a, b) {
-      final aCreatedAt = (a.value['nostrEvent'] as Map)['created_at'] as int;
-      final bCreatedAt = (b.value['nostrEvent'] as Map)['created_at'] as int;
-      return bCreatedAt.compareTo(aCreatedAt);
-    });
+    // Move ALL versions of the file/folder
+    for (final record in records) {
+      final decryptedContent = Map<String, dynamic>.from(
+        record.value['decryptedContent'] as Map<String, dynamic>,
+      );
 
-    final latestRecord = records.first;
-    final decryptedContent = Map<String, dynamic>.from(
-      latestRecord.value['decryptedContent'] as Map<String, dynamic>,
-    );
+      // Update the path
+      decryptedContent['path'] = newPath;
 
-    // Update the path
-    decryptedContent['path'] = newPath;
+      // Create new event with updated path
+      final content = jsonEncode(decryptedContent);
+      final encryptedContent = await account.signer.encryptNip44(
+        plaintext: content,
+        recipientPubKey: account.pubkey,
+      );
 
-    // Create new event with updated path
-    final content = jsonEncode(decryptedContent);
-    final encryptedContent = await account.signer.encryptNip44(
-      plaintext: content,
-      recipientPubKey: account.pubkey,
-    );
+      if (encryptedContent == null) {
+        throw Exception('Failed to encrypt content');
+      }
 
-    if (encryptedContent == null) {
-      throw Exception('Failed to encrypt content');
+      final event = Nip01Event(
+        pubKey: account.pubkey,
+        kind: 9500,
+        content: encryptedContent,
+        tags: [],
+      );
+
+      // Store in local database
+      await _store.record(event.id).put(db, {
+        'nostrEvent': event.toJson(),
+        'decryptedContent': decryptedContent,
+      });
+
+      // Broadcast the new event
+      ndk.broadcast.broadcast(nostrEvent: event);
+      
+      // Delete the old entry
+      await deleteById(record.key);
     }
-
-    final event = Nip01Event(
-      pubKey: account.pubkey,
-      kind: 9500,
-      content: encryptedContent,
-      tags: [],
-    );
-
-    // Store in local database
-    await _store.record(event.id).put(db, {
-      'nostrEvent': event.toJson(),
-      'decryptedContent': decryptedContent,
-    });
-
-    // Delete the old entry
-    await deleteById(latestRecord.key);
+    
+    // Get the type from the first record to determine if we need to move children
+    final firstRecord = records.first;
+    final decryptedContent = firstRecord.value['decryptedContent'] as Map<String, dynamic>;
 
     // If it's a folder, also move all children
     if (decryptedContent['type'] == 'folder') {
       await _moveChildren(oldPath, newPath, account);
     }
 
-    // Broadcast the new event
-    ndk.broadcast.broadcast(nostrEvent: event);
+    // Notify listeners about the move
+    _changeController.add(DriveChangeEvent(type: 'deleted', path: oldPath));
+    _changeController.add(DriveChangeEvent(type: 'added', path: newPath));
   }
 
   // Helper method to move all children of a folder
@@ -621,7 +763,7 @@ class DriveService {
       throw Exception('User not logged in');
     }
 
-    // Find the most recent event for the source path
+    // Find ALL versions of the file at the source path
     final records = await _store.find(
       db,
       finder: sembast.Finder(
@@ -636,53 +778,57 @@ class DriveService {
       throw Exception('File or folder not found at path: $sourcePath');
     }
 
-    // Get the most recent record
-    records.sort((a, b) {
-      final aCreatedAt = (a.value['nostrEvent'] as Map)['created_at'] as int;
-      final bCreatedAt = (b.value['nostrEvent'] as Map)['created_at'] as int;
-      return bCreatedAt.compareTo(aCreatedAt);
-    });
+    // Copy ALL versions of the file/folder
+    for (final record in records) {
+      final sourceContent = Map<String, dynamic>.from(
+        record.value['decryptedContent'] as Map<String, dynamic>,
+      );
 
-    final sourceRecord = records.first;
-    final sourceContent = Map<String, dynamic>.from(
-      sourceRecord.value['decryptedContent'] as Map<String, dynamic>,
-    );
+      // Create a copy with the new path
+      final copiedContent = Map<String, dynamic>.from(sourceContent);
+      copiedContent['path'] = destinationPath;
 
-    // Create a copy with the new path
-    final copiedContent = Map<String, dynamic>.from(sourceContent);
-    copiedContent['path'] = destinationPath;
+      // Create new event for the copy
+      final content = jsonEncode(copiedContent);
+      final encryptedContent = await account.signer.encryptNip44(
+        plaintext: content,
+        recipientPubKey: account.pubkey,
+      );
 
-    // Create new event for the copy
-    final content = jsonEncode(copiedContent);
-    final encryptedContent = await account.signer.encryptNip44(
-      plaintext: content,
-      recipientPubKey: account.pubkey,
-    );
+      if (encryptedContent == null) {
+        throw Exception('Failed to encrypt content');
+      }
 
-    if (encryptedContent == null) {
-      throw Exception('Failed to encrypt content');
+      final event = Nip01Event(
+        pubKey: account.pubkey,
+        kind: 9500,
+        content: encryptedContent,
+        tags: [],
+      );
+
+      // Store in local database
+      await _store.record(event.id).put(db, {
+        'nostrEvent': event.toJson(),
+        'decryptedContent': copiedContent,
+      });
+
+      // Broadcast the new event
+      ndk.broadcast.broadcast(nostrEvent: event);
     }
-
-    final event = Nip01Event(
-      pubKey: account.pubkey,
-      kind: 9500,
-      content: encryptedContent,
-      tags: [],
-    );
-
-    // Store in local database
-    await _store.record(event.id).put(db, {
-      'nostrEvent': event.toJson(),
-      'decryptedContent': copiedContent,
-    });
-
+    
+    // Get the type from the first record to determine if we need to copy children
+    final firstRecord = records.first;
+    final copiedContent = firstRecord.value['decryptedContent'] as Map<String, dynamic>;
+    
     // If it's a folder, also copy all children
     if (copiedContent['type'] == 'folder') {
       await _copyChildren(sourcePath, destinationPath, account);
     }
 
-    // Broadcast the new event
-    ndk.broadcast.broadcast(nostrEvent: event);
+    // Notify listeners about the copy
+    _changeController.add(
+      DriveChangeEvent(type: 'added', path: destinationPath),
+    );
   }
 
   // Helper method to copy all children of a folder

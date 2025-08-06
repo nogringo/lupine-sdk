@@ -10,7 +10,7 @@ class FileMetadata extends DriveItem {
 
   final String hash;
   final int size;
-  final String fileType;
+  final String? fileType;
   final String? encryptionAlgorithm;
   final String? decryptionKey;
   final String? decryptionNonce;
@@ -28,7 +28,7 @@ class FileMetadata extends DriveItem {
     required this.hash,
     required this.path,
     required this.size,
-    required this.fileType,
+    this.fileType,
     this.encryptionAlgorithm,
     this.decryptionKey,
     this.decryptionNonce,
@@ -42,7 +42,7 @@ class FileMetadata extends DriveItem {
     'hash': hash,
     'path': path,
     'size': size,
-    'file-type': fileType,
+    if (fileType != null) 'file-type': fileType,
     if (encryptionAlgorithm != null)
       'encryption-algorithm': encryptionAlgorithm,
     if (decryptionKey != null) 'decryption-key': decryptionKey,
@@ -53,7 +53,7 @@ class FileMetadata extends DriveItem {
     hash: json['hash'] as String,
     path: json['path'] as String,
     size: json['size'] as int,
-    fileType: json['file-type'] as String,
+    fileType: json['file-type'] as String?,
     encryptionAlgorithm: json['encryption-algorithm'] as String?,
     decryptionKey: json['decryption-key'] as String?,
     decryptionNonce: json['decryption-nonce'] as String?,
