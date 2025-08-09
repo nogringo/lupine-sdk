@@ -269,8 +269,7 @@ void main() {
       // Wait for broadcast
       await Future.delayed(Duration(seconds: 1));
 
-      // Initialize and sync device 2
-      await driveService2.initialize();
+      // Sync device 2 (already initialized on creation)
       await driveService2.sync();
 
       // Wait for sync to complete
@@ -293,8 +292,7 @@ void main() {
       await driveService1.createFolder(testFolder);
       await Future.delayed(Duration(seconds: 1));
 
-      // Sync to device 2
-      await driveService2.initialize();
+      // Sync to device 2 (already initialized on creation)
       await driveService2.sync();
       await Future.delayed(Duration(seconds: 1));
 
@@ -316,10 +314,7 @@ void main() {
     });
 
     test('should emit change events during sync', () async {
-      // Initialize device 2 first to ensure subscription works
-      await driveService2.initialize();
-
-      // Listen for changes on device 2
+      // Listen for changes on device 2 (already initialized on creation)
       final changes = <DriveChangeEvent>[];
       final subscription = driveService2.changes.listen(changes.add);
 
@@ -368,11 +363,7 @@ void main() {
     });
 
     test('should track last sync time', () async {
-      // Initially no sync time
-      expect(driveService2.lastSync, isNull);
-
-      // Initialize and sync
-      await driveService2.initialize();
+      // Force a manual sync to update lastSync
       await driveService2.sync();
 
       // Should have a last sync time

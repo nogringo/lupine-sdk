@@ -17,81 +17,61 @@ class SyncManager {
 
   SyncManager({required this.ndk, required this.db, this.onDriveChange});
 
+  // Handle account changes (login/logout/switch)
+  Future<void> onAccountChanged() async {
+    // Stop any existing sync
+    stopSync();
+    
+    // Clear the last sync time as we have a new account
+    _lastSync = null;
+    
+    // Start syncing with new account (if logged in)
+    await startSync();
+  }
+
   // Start syncing events from Nostr relays
   Future<void> startSync() async {
+    print("startSync");
     final account = ndk.accounts.getLoggedAccount();
     if (account == null) {
-      throw Exception('User not logged in');
+      // No user logged in, nothing to sync
+      return;
     }
 
     // Get the timestamp of the most recent event in our database
     final mostRecentEvent = await _getMostRecentEventTime();
+    print(mostRecentEvent);
 
-    // Create filters for:
-    // 1. Our own drive events
+    // Create filters:
+    // 1. All events we authored (drive events + deletions)
     final ownEventsFilter = Filter(
-      kinds: const [9500],
+      kinds: const [9500, 5],  // Both drive and deletion events
       authors: [account.pubkey],
-      since: mostRecentEvent,
+      since: mostRecentEvent, // null if no events, which fetches all
     );
 
-    // 2. Events shared with us (where we're tagged)
+    // 2. Drive events shared with us (we're tagged)
     final sharedEventsFilter = Filter(
       kinds: const [9500],
       pTags: [account.pubkey],
-      since: mostRecentEvent,
+      since: mostRecentEvent, // null if no events, which fetches all
     );
 
-    // 3. Deletion events
-    final deletionFilter = Filter(
-      kinds: const [5],
-      authors: [account.pubkey],
-      since: mostRecentEvent,
-    );
-
-    // Subscribe to all event types
+    // Subscribe to both filters (OR between them)
     _subscription = ndk.requests
         .subscription(
-          filters: [ownEventsFilter, sharedEventsFilter, deletionFilter],
+          filters: [ownEventsFilter, sharedEventsFilter],
         )
         .stream
         .listen(_handleIncomingEvent);
-
-    // Also fetch historical events
-    await fetchHistoricalEvents();
-  }
-
-  // Fetch all historical events
-  Future<void> fetchHistoricalEvents() async {
-    final account = ndk.accounts.getLoggedAccount();
-    if (account == null) {
-      throw Exception('User not logged in');
-    }
-
-    // Fetch both our own events and events shared with us
-    final ownEventsFilter = Filter(
-      kinds: const [9500],
-      authors: [account.pubkey],
-    );
-
-    final sharedEventsFilter = Filter(
-      kinds: const [9500],
-      pTags: [account.pubkey],
-    );
-
-    final response = ndk.requests.query(
-      filters: [ownEventsFilter, sharedEventsFilter],
-    );
-
-    await for (final event in response.stream) {
-      await _handleDriveEvent(event);
-    }
-
+    print("startSync : sub");
+    
     _lastSync = DateTime.now();
   }
 
   // Handle incoming events (drive events and deletions)
   Future<void> _handleIncomingEvent(Nip01Event event) async {
+    print("event");
     if (event.kind == 5) {
       // Handle deletion event
       await _handleDeletionEvent(event);
@@ -171,11 +151,6 @@ class SyncManager {
   bool get isSyncing => _subscription != null;
   DateTime? get lastSync => _lastSync;
 
-  // Force a manual sync
-  Future<void> syncNow() async {
-    await fetchHistoricalEvents();
-  }
-
   // Handle a single deletion event
   Future<void> _handleDeletionEvent(Nip01Event event) async {
     // Process e tags (events to delete)
@@ -191,29 +166,6 @@ class SyncManager {
 
         // Notify about the deletion
         onDriveChange?.call('deleted', path);
-      }
-    }
-  }
-
-  // Manually sync deletion events (for initial sync)
-  Future<void> syncDeletions() async {
-    final account = ndk.accounts.getLoggedAccount();
-    if (account == null) return;
-
-    final filter = Filter(
-      kinds: const [5], // NIP-09 deletion events
-      authors: [account.pubkey],
-    );
-
-    final response = ndk.requests.query(filters: [filter]);
-
-    await for (final event in response.stream) {
-      // Process e tags (events to delete)
-      for (final tag in event.tags) {
-        if (tag.length >= 2 && tag[0] == 'e') {
-          final eventIdToDelete = tag[1];
-          await _store.record(eventIdToDelete).delete(db);
-        }
       }
     }
   }

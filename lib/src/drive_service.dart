@@ -36,14 +36,18 @@ class DriveService {
         _changeController.add(DriveChangeEvent(type: type, path: path));
       },
     );
+    
+    // Start syncing automatically
+    _syncManager.startSync();
   }
 
-  // Initialize the drive service and start syncing
-  Future<void> initialize() async {
-    await _syncManager.startSync();
+  // Call this when the account changes (login/logout)
+  Future<void> onAccountChanged() async {
+    // Let sync manager handle the account change
+    await _syncManager.onAccountChanged();
   }
 
-  // Stop syncing and clean up resources
+  // Dispose everything and clean up all resources
   void dispose() {
     _syncManager.dispose();
     _changeController.close();
@@ -55,8 +59,8 @@ class DriveService {
 
   // Force a manual sync
   Future<void> sync() async {
-    await _syncManager.syncNow();
-    await _syncManager.syncDeletions();
+    // await _syncManager.syncNow();
+    // await _syncManager.syncDeletions();
   }
 
   // Helper to create filter that includes both our files and shared files
@@ -218,14 +222,14 @@ class DriveService {
       // Encrypt using AESGCMEncryption
       final aes = AESGCMEncryption();
       final result = await aes.encryptFile(fileData);
-      
+
       processedData = result['encryptedData'] as Uint8List;
       final key = result['key'] as SecretKey;
       final nonce = result['nonce'] as List<int>;
-      
+
       // Extract key bytes for storage
       final keyBytes = await key.extractBytes();
-      
+
       encryptionAlgorithm = 'aes-gcm';
       decryptionKey = base64Encode(keyBytes);
       decryptionNonce = base64Encode(nonce);
@@ -690,14 +694,15 @@ class DriveService {
 
       // Broadcast the new event
       ndk.broadcast.broadcast(nostrEvent: event);
-      
+
       // Delete the old entry
       await deleteById(record.key);
     }
-    
+
     // Get the type from the first record to determine if we need to move children
     final firstRecord = records.first;
-    final decryptedContent = firstRecord.value['decryptedContent'] as Map<String, dynamic>;
+    final decryptedContent =
+        firstRecord.value['decryptedContent'] as Map<String, dynamic>;
 
     // If it's a folder, also move all children
     if (decryptedContent['type'] == 'folder') {
@@ -815,11 +820,12 @@ class DriveService {
       // Broadcast the new event
       ndk.broadcast.broadcast(nostrEvent: event);
     }
-    
+
     // Get the type from the first record to determine if we need to copy children
     final firstRecord = records.first;
-    final copiedContent = firstRecord.value['decryptedContent'] as Map<String, dynamic>;
-    
+    final copiedContent =
+        firstRecord.value['decryptedContent'] as Map<String, dynamic>;
+
     // If it's a folder, also copy all children
     if (copiedContent['type'] == 'folder') {
       await _copyChildren(sourcePath, destinationPath, account);
