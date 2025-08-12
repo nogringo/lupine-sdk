@@ -1,12 +1,11 @@
 name: lupine_sdk
-description: A starting point for Dart libraries or applications.
-version: 1.0.0
-# repository: https://github.com/my_org/my_repo
+description: Secure, encrypted cloud drive service built on Nostr protocol with real-time sync.
+version: 2.0.0
+repository: https://github.com/nogringo/lupine-sdk
 
 environment:
   sdk: ^3.8.1
 
-# Add regular dependencies here.
 dependencies:
   convert: ^3.1.2
   crypto: ^3.0.6
@@ -17,8 +16,7 @@ dependencies:
   path: ^1.9.1
   pointycastle: ^3.9.1
   sembast: ^3.8.5+1
-  # path: ^1.8.0
 
 dev_dependencies:
-  lints: ^5.0.0
-  test: ^1.24.0
+  lints: ^6.0.0
+  test: ^1.26.3

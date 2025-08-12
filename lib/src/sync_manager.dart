@@ -21,10 +21,10 @@ class SyncManager {
   Future<void> onAccountChanged() async {
     // Stop any existing sync
     stopSync();
-    
+
     // Clear the last sync time as we have a new account
     _lastSync = null;
-    
+
     // Start syncing with new account (if logged in)
     await startSync();
   }
@@ -45,7 +45,7 @@ class SyncManager {
     // Create filters:
     // 1. All events we authored (drive events + deletions)
     final ownEventsFilter = Filter(
-      kinds: const [9500, 5],  // Both drive and deletion events
+      kinds: const [9500, 5], // Both drive and deletion events
       authors: [account.pubkey],
       since: mostRecentEvent, // null if no events, which fetches all
     );
@@ -59,13 +59,11 @@ class SyncManager {
 
     // Subscribe to both filters (OR between them)
     _subscription = ndk.requests
-        .subscription(
-          filters: [ownEventsFilter, sharedEventsFilter],
-        )
+        .subscription(filters: [ownEventsFilter, sharedEventsFilter])
         .stream
         .listen(_handleIncomingEvent);
     print("startSync : sub");
-    
+
     _lastSync = DateTime.now();
   }
 

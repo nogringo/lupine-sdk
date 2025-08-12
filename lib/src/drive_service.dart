@@ -36,7 +36,7 @@ class DriveService {
         _changeController.add(DriveChangeEvent(type: type, path: path));
       },
     );
-    
+
     // Start syncing automatically
     _syncManager.startSync();
   }
