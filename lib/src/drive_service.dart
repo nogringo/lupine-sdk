@@ -11,6 +11,7 @@ import 'package:lupine_sdk/src/sync_manager.dart';
 import 'package:lupine_sdk/src/utils/aes_gcm.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:ndk/ndk.dart';
+import 'package:nip49/nip49.dart';
 import 'package:path/path.dart' as p;
 import 'package:sembast/sembast.dart' as sembast;
 
@@ -380,6 +381,126 @@ class DriveService {
       } catch (e) {
         // Skip items that can't be parsed
         print(e);
+        continue;
+      }
+    }
+
+    return items;
+  }
+
+  // Share a file with another Nostr user
+  Future<void> shareWithNostrUser({
+    required String eventId,
+    required String recipientPubkey,
+  }) async {
+    final account = ndk.accounts.getLoggedAccount();
+    if (account == null) {
+      throw Exception('User not logged in');
+    }
+
+    // Get the file from database using event ID
+    final record = await _store.record(eventId).get(db);
+    if (record == null) {
+      throw Exception('File not found with ID: $eventId');
+    }
+
+    // Verify user owns this file
+    final nostrEvent = record['nostrEvent'] as Map<String, dynamic>?;
+    if (nostrEvent == null || nostrEvent['pubkey'] != account.pubkey) {
+      throw Exception('You can only share your own files');
+    }
+
+    final decryptedContent = record['decryptedContent'] as Map<String, dynamic>?;
+    if (decryptedContent == null) {
+      throw Exception('Invalid file data');
+    }
+
+    // Encrypt the file metadata for the recipient using NIP-44
+    final content = jsonEncode(decryptedContent);
+    final encryptedContent = await account.signer.encryptNip44(
+      plaintext: content,
+      recipientPubKey: recipientPubkey,
+    );
+
+    if (encryptedContent == null) {
+      throw Exception('Failed to encrypt content for recipient');
+    }
+
+    // Create a new event with the recipient tagged
+    final shareEvent = Nip01Event(
+      pubKey: account.pubkey,
+      kind: 9500,
+      content: encryptedContent,
+      tags: [
+        ['p', recipientPubkey], // Tag the recipient so they can discover the share
+      ],
+    );
+
+    // Store the share event locally
+    await _store.record(shareEvent.id).put(db, {
+      'nostrEvent': shareEvent.toJson(),
+      'decryptedContent': decryptedContent,
+      'sharedWith': recipientPubkey,
+      'originalEventId': eventId,
+    });
+
+    // Broadcast the share event
+    ndk.broadcast.broadcast(nostrEvent: shareEvent);
+
+    // Notify about the share
+    final path = decryptedContent['path'] as String;
+    _changeController.add(DriveChangeEvent(
+      type: 'shared',
+      path: path,
+    ));
+  }
+
+  // Get files shared with me by other Nostr users
+  Future<List<DriveItem>> getSharedWithMe() async {
+    final account = ndk.accounts.getLoggedAccount();
+    if (account == null) {
+      throw Exception('User not logged in');
+    }
+
+    // Find all items shared with us (where we're tagged with 'p')
+    final records = await _store.find(
+      db,
+      finder: sembast.Finder(
+        filter: sembast.Filter.and([
+          // Files where we're tagged but not the author
+          sembast.Filter.custom((record) {
+            final nostrEvent = record['nostrEvent'] as Map<String, dynamic>?;
+            if (nostrEvent == null) return false;
+            
+            final pubkey = nostrEvent['pubkey'] as String?;
+            if (pubkey == null || pubkey == account.pubkey) return false; // Skip our own files
+            
+            // Check if we're tagged
+            final tags = nostrEvent['tags'] as List<dynamic>?;
+            if (tags != null) {
+              for (final tag in tags) {
+                if (tag is List &&
+                    tag.length >= 2 &&
+                    tag[0] == 'p' &&
+                    tag[1] == account.pubkey) {
+                  return true;
+                }
+              }
+            }
+            return false;
+          }),
+        ]),
+      ),
+    );
+
+    // Convert to DriveItem objects
+    final items = <DriveItem>[];
+    for (final record in records) {
+      try {
+        final item = DriveItemFactory.fromJson(record.value);
+        items.add(item);
+      } catch (e) {
+        print('Error parsing shared item: $e');
         continue;
       }
     }
