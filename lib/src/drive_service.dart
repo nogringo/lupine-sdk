@@ -9,8 +9,10 @@ import 'package:lupine_sdk/src/models/drive_item_factory.dart';
 import 'package:lupine_sdk/src/models/file_metadata.dart';
 import 'package:lupine_sdk/src/sync_manager.dart';
 import 'package:lupine_sdk/src/utils/aes_gcm.dart';
-import 'package:cryptography/cryptography.dart';
+import 'package:cryptography/cryptography.dart' hide KeyPair;
 import 'package:ndk/ndk.dart';
+import 'package:nip01/nip01.dart';
+import 'package:nip19/nip19.dart';
 import 'package:nip49/nip49.dart';
 import 'package:path/path.dart' as p;
 import 'package:sembast/sembast.dart' as sembast;
@@ -410,7 +412,8 @@ class DriveService {
       throw Exception('You can only share your own files');
     }
 
-    final decryptedContent = record['decryptedContent'] as Map<String, dynamic>?;
+    final decryptedContent =
+        record['decryptedContent'] as Map<String, dynamic>?;
     if (decryptedContent == null) {
       throw Exception('Invalid file data');
     }
@@ -432,7 +435,10 @@ class DriveService {
       kind: 9500,
       content: encryptedContent,
       tags: [
-        ['p', recipientPubkey], // Tag the recipient so they can discover the share
+        [
+          'p',
+          recipientPubkey,
+        ], // Tag the recipient so they can discover the share
       ],
     );
 
@@ -449,10 +455,251 @@ class DriveService {
 
     // Notify about the share
     final path = decryptedContent['path'] as String;
-    _changeController.add(DriveChangeEvent(
-      type: 'shared',
-      path: path,
-    ));
+    _changeController.add(DriveChangeEvent(type: 'shared', path: path));
+  }
+
+  // Generate a shareable link for a file with optional password protection
+  Future<Map<String, String>> generateShareLink({
+    required String eventId,
+    String? password,
+    String baseUrl = 'https://example.com/share',
+    List<String>? relays,
+  }) async {
+    final account = ndk.accounts.getLoggedAccount();
+    if (account == null) {
+      throw Exception('User not logged in');
+    }
+
+    // Get the file from database using event ID
+    final record = await _store.record(eventId).get(db);
+    if (record == null) {
+      throw Exception('File not found with ID: $eventId');
+    }
+
+    // Verify user owns this file
+    final nostrEvent = record['nostrEvent'] as Map<String, dynamic>?;
+    if (nostrEvent == null || nostrEvent['pubkey'] != account.pubkey) {
+      throw Exception('You can only share your own files');
+    }
+
+    // Generate a new keypair for this share link
+    final keyPair = KeyPair.generate();
+    final sharePrivateKey = keyPair.privateKey;
+    final sharePublicKey = keyPair.publicKey;
+
+    // Use provided relays or default ones
+    final shareRelays =
+        relays ??
+        ['wss://relay.damus.io', 'wss://relay.nostr.band', 'wss://nos.lol'];
+
+    // Share the file with the new pubkey
+    await shareWithNostrUser(eventId: eventId, recipientPubkey: sharePublicKey);
+
+    // Create the share link
+    String shareLink;
+    String encodedKey;
+
+    if (password != null && password.isNotEmpty) {
+      // Use NIP-49 to create an encrypted private key
+      final encryptedKey = await Nip49.encrypt(sharePrivateKey, password);
+      encodedKey = encryptedKey;
+      shareLink = '$baseUrl/$encryptedKey';
+    } else {
+      // Use regular nsec encoding for non-password protected links
+      final nsecKey = Nip19.nsecFromHex(sharePrivateKey);
+      encodedKey = nsecKey;
+      shareLink = '$baseUrl/$nsecKey';
+    }
+
+    // Store share link info locally for management
+    final shareId = 'share_$sharePublicKey';
+    await _store.record(shareId).put(db, {
+      'eventId': eventId,
+      'sharePublicKey': sharePublicKey,
+      'sharePrivateKey': sharePrivateKey,
+      'hasPassword': password != null,
+      'createdAt': DateTime.now().toIso8601String(),
+      'createdBy': account.pubkey,
+      'relays': shareRelays,
+    });
+
+    return {
+      'shareLink': shareLink,
+      'shareKey': encodedKey,
+      'publicKey': sharePublicKey,
+      'eventId': eventId,
+      if (password != null) 'password': password,
+    };
+  }
+
+  // Access a shared file via share link
+  Future<DriveItem> accessSharedFile({
+    required String shareKeyOrLink,
+    String? password,
+    List<String>? relays,
+  }) async {
+    // Extract the key from the link if a full URL is provided
+    String shareKey = shareKeyOrLink;
+    if (shareKeyOrLink.startsWith('http')) {
+      final parts = shareKeyOrLink.split('/');
+      shareKey = parts.last;
+    }
+
+    // Decode the private key
+    String privateKey;
+
+    if (shareKey.startsWith('ncryptsec1')) {
+      // NIP-49 encrypted private key
+      if (password == null || password.isEmpty) {
+        throw Exception('Password required for encrypted share link');
+      }
+
+      try {
+        privateKey = await Nip49.decrypt(shareKey, password);
+      } catch (e) {
+        throw Exception('Invalid password or corrupted share key');
+      }
+    } else if (shareKey.startsWith('nsec1')) {
+      // Regular nsec private key
+      try {
+        privateKey = Nip19.nsecToHex(shareKey);
+      } catch (e) {
+        throw Exception('Invalid share key format');
+      }
+    } else {
+      throw Exception('Unsupported share key format');
+    }
+
+    // Generate the keypair from private key
+    final shareKeyPair = KeyPair.fromPrivateKey(privateKey: privateKey);
+    final publicKey = shareKeyPair.publicKey;
+
+    // Create a temporary NDK instance with the share keypair
+    final shareRelays =
+        relays ??
+        ['wss://relay.damus.io', 'wss://relay.nostr.band', 'wss://nos.lol'];
+
+    final tempNdk = Ndk(
+      NdkConfig(
+        eventVerifier: Bip340EventVerifier(),
+        cache: MemCacheManager(),
+        engine: NdkEngine.JIT,
+      ),
+    );
+
+    // Login with the share keypair
+    tempNdk.accounts.loginPrivateKey(pubkey: publicKey, privkey: privateKey);
+
+    // The relays will be used in the query as explicitRelays
+    // No need to explicitly connect here
+
+    // Query for files shared with this pubkey
+    final response = tempNdk.requests.query(
+      filters: [
+        Filter(
+          kinds: const [9500],
+          tags: {
+            'p': [publicKey],
+          },
+        ),
+      ],
+      explicitRelays: shareRelays,
+    );
+    final events = await response.stream.toList();
+
+    if (events.isEmpty) {
+      throw Exception('No files found for this share link');
+    }
+
+    // Get the most recent share event
+    final shareEvent = events.first;
+
+    // Decrypt the content
+    final account = tempNdk.accounts.getLoggedAccount();
+    if (account == null) {
+      throw Exception('Failed to access share account');
+    }
+
+    final decryptedContent = await account.signer.decryptNip44(
+      ciphertext: shareEvent.content,
+      senderPubKey: shareEvent.pubKey,
+    );
+
+    if (decryptedContent == null) {
+      throw Exception('Failed to decrypt shared file');
+    }
+
+    // Parse the decrypted content
+    final fileMetadata = jsonDecode(decryptedContent) as Map<String, dynamic>;
+
+    // Store the shared file locally for the current user
+    final currentAccount = ndk.accounts.getLoggedAccount();
+    if (currentAccount != null) {
+      // Store with a reference to the share
+      await _store.record('shared_${shareEvent.id}').put(db, {
+        'nostrEvent': shareEvent.toJson(),
+        'decryptedContent': fileMetadata,
+        'sharedVia': 'link',
+        'sharePublicKey': publicKey,
+        'accessedAt': DateTime.now().toIso8601String(),
+      });
+    }
+
+    // Clean up temporary NDK instance
+    tempNdk.destroy();
+
+    // Create and return the DriveItem
+    return DriveItemFactory.fromJson({
+      'decryptedContent': fileMetadata,
+      'nostrEvent': shareEvent.toJson(),
+    });
+  }
+
+  // Revoke a share link
+  Future<void> revokeShareLink(String publicKeyOrEventId) async {
+    final account = ndk.accounts.getLoggedAccount();
+    if (account == null) {
+      throw Exception('User not logged in');
+    }
+
+    // Find the share record
+    final shareId = publicKeyOrEventId.startsWith('share_')
+        ? publicKeyOrEventId
+        : 'share_$publicKeyOrEventId';
+
+    final record = await _store.record(shareId).get(db);
+    if (record == null) {
+      throw Exception('Share link not found');
+    }
+
+    // Verify ownership
+    if (record['createdBy'] != account.pubkey) {
+      throw Exception('You can only revoke your own share links');
+    }
+
+    final sharePublicKey = record['sharePublicKey'] as String;
+
+    // Find all share events for this public key and broadcast deletions
+    final shareEvents = await _store.find(
+      db,
+      finder: sembast.Finder(
+        filter: sembast.Filter.and([
+          sembast.Filter.equals('sharedWith', sharePublicKey),
+          sembast.Filter.equals('nostrEvent.pubkey', account.pubkey),
+        ]),
+      ),
+    );
+
+    for (final event in shareEvents) {
+      final eventId = event.key;
+      // Broadcast deletion for each share event
+      ndk.broadcast.broadcastDeletion(eventId: eventId);
+      // Remove from local storage
+      await _store.record(eventId).delete(db);
+    }
+
+    // Remove the share link record
+    await _store.record(shareId).delete(db);
   }
 
   // Get files shared with me by other Nostr users
@@ -471,10 +718,11 @@ class DriveService {
           sembast.Filter.custom((record) {
             final nostrEvent = record['nostrEvent'] as Map<String, dynamic>?;
             if (nostrEvent == null) return false;
-            
+
             final pubkey = nostrEvent['pubkey'] as String?;
-            if (pubkey == null || pubkey == account.pubkey) return false; // Skip our own files
-            
+            if (pubkey == null || pubkey == account.pubkey)
+              return false; // Skip our own files
+
             // Check if we're tagged
             final tags = nostrEvent['tags'] as List<dynamic>?;
             if (tags != null) {
