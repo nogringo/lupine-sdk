@@ -7,6 +7,7 @@ import 'package:lupine_sdk/src/models/drive_change_event.dart';
 import 'package:lupine_sdk/src/models/drive_item.dart';
 import 'package:lupine_sdk/src/models/drive_item_factory.dart';
 import 'package:lupine_sdk/src/models/file_metadata.dart';
+import 'package:lupine_sdk/src/utils/nevent.dart';
 import 'package:lupine_sdk/src/sync_manager.dart';
 import 'package:lupine_sdk/src/utils/aes_gcm.dart';
 import 'package:cryptography/cryptography.dart' hide KeyPair;
@@ -303,8 +304,28 @@ class DriveService {
     );
   }
 
-  // List files and folders
-  Future<List<DriveItem>> list(String path) async {
+  /// Lists files and folders in a directory with optional MIME type filtering.
+  ///
+  /// [path] - The absolute path of the directory to list (must start with '/').
+  /// [mimeTypes] - Optional list of MIME types to filter by. If provided, only
+  ///               files matching these MIME types will be returned.
+  ///               Common examples:
+  ///               - Images: ['image/jpeg', 'image/png', 'image/gif']
+  ///               - Videos: ['video/mp4', 'video/webm', 'video/mpeg']
+  ///               - Documents: ['application/pdf', 'text/plain']
+  /// [recursive] - If true, includes items from all subdirectories. Defaults to false.
+  ///
+  /// Returns a list of [DriveItem] objects (files and folders).
+  /// When mimeTypes filter is provided, folders are excluded from results.
+  ///
+  /// Throws:
+  /// - [ArgumentError] if the path is not absolute.
+  /// - [Exception] if the user is not logged in.
+  Future<List<DriveItem>> list(
+    String path, {
+    List<String>? mimeTypes,
+    bool recursive = false,
+  }) async {
     // Normalize path using path package
     path = p.normalize(path);
 
@@ -313,34 +334,64 @@ class DriveService {
       throw ArgumentError('Path must be absolute (start with /)');
     }
 
+    // Build filters
+    final filters = <sembast.Filter>[
+      _createAccessibleFilesFilter(), // Include both owned and shared files
+      sembast.Filter.custom((record) {
+        final decryptedContent =
+            record['decryptedContent'] as Map<String, dynamic>?;
+        if (decryptedContent == null) return false;
+
+        final itemPath = decryptedContent['path'] as String?;
+        if (itemPath == null) return false;
+
+        if (recursive) {
+          // Include items in the directory and all subdirectories
+          if (path == '/') {
+            // For root, include everything
+            return true;
+          } else {
+            // Use path.isWithin to properly check if itemPath is within the directory
+            // This handles edge cases like /documents vs /documents2
+            return itemPath == path || p.isWithin(path, itemPath);
+          }
+        } else {
+          // Check if item is in the requested directory (not subdirectories)
+          final itemDir = p.dirname(itemPath);
+
+          // For root directory
+          if (path == '/') {
+            // Item should be in root (dirname should be '/')
+            if (itemDir != '/') return false;
+          } else {
+            // For other directories, check if item's parent is the requested path
+            if (itemDir != path) return false;
+          }
+        }
+
+        // Apply MIME type filter if provided
+        if (mimeTypes != null && mimeTypes.isNotEmpty) {
+          final type = decryptedContent['type'] as String?;
+          // Only filter files when MIME types are specified
+          if (type != 'file') return false;
+
+          final fileType = decryptedContent['file-type'] as String?;
+          if (fileType == null) return false;
+
+          // Check if file type matches any of the requested MIME types
+          return mimeTypes.any(
+            (mimeType) => fileType.toLowerCase() == mimeType.toLowerCase(),
+          );
+        }
+
+        return true;
+      }),
+    ];
+
     // Find all items in the directory from local database
     final records = await _store.find(
       db,
-      finder: sembast.Finder(
-        filter: sembast.Filter.and([
-          _createAccessibleFilesFilter(), // Include both owned and shared files
-          sembast.Filter.custom((record) {
-            final decryptedContent =
-                record['decryptedContent'] as Map<String, dynamic>?;
-            if (decryptedContent == null) return false;
-
-            final itemPath = decryptedContent['path'] as String?;
-            if (itemPath == null) return false;
-
-            // Check if item is in the requested directory
-            final itemDir = p.dirname(itemPath);
-
-            // For root directory
-            if (path == '/') {
-              // Item should be in root (dirname should be '/')
-              return itemDir == '/';
-            }
-
-            // For other directories, check if item's parent is the requested path
-            return itemDir == path;
-          }),
-        ]),
-      ),
+      finder: sembast.Finder(filter: sembast.Filter.and(filters)),
     );
 
     // Group records by path and keep only the latest version
@@ -391,7 +442,7 @@ class DriveService {
   }
 
   // Share a file with another Nostr user
-  Future<void> shareWithNostrUser({
+  Future<Nip01Event> shareWithNostrUser({
     required String eventId,
     required String recipientPubkey,
   }) async {
@@ -456,10 +507,12 @@ class DriveService {
     // Notify about the share
     final path = decryptedContent['path'] as String;
     _changeController.add(DriveChangeEvent(type: 'shared', path: path));
+
+    return shareEvent;
   }
 
   // Generate a shareable link for a file with optional password protection
-  Future<Map<String, String>> generateShareLink({
+  Future<String> generateShareLink({
     required String eventId,
     String? password,
     String baseUrl = 'https://example.com/share',
@@ -493,166 +546,33 @@ class DriveService {
         ['wss://relay.damus.io', 'wss://relay.nostr.band', 'wss://nos.lol'];
 
     // Share the file with the new pubkey
-    await shareWithNostrUser(eventId: eventId, recipientPubkey: sharePublicKey);
+    final shareEvent = await shareWithNostrUser(
+      eventId: eventId,
+      recipientPubkey: sharePublicKey,
+    );
 
-    // Create the share link
-    String shareLink;
+    // Create nevent using the NeventCodec
+    final neventObj = Nevent(
+      eventId: shareEvent.id,
+      relays: shareRelays,
+      author: shareEvent.pubKey,
+      kind: shareEvent.kind,
+    );
+    final nevent = NeventCodec.encode(neventObj);
+
+    // Create the share link with format: baseUrl/nevent/nsecORncryptsec
     String encodedKey;
-
     if (password != null && password.isNotEmpty) {
       // Use NIP-49 to create an encrypted private key
-      final encryptedKey = await Nip49.encrypt(sharePrivateKey, password);
-      encodedKey = encryptedKey;
-      shareLink = '$baseUrl/$encryptedKey';
+      encodedKey = await Nip49.encrypt(sharePrivateKey, password);
     } else {
       // Use regular nsec encoding for non-password protected links
-      final nsecKey = Nip19.nsecFromHex(sharePrivateKey);
-      encodedKey = nsecKey;
-      shareLink = '$baseUrl/$nsecKey';
+      encodedKey = Nip19.nsecFromHex(sharePrivateKey);
     }
 
-    // Store share link info locally for management
-    final shareId = 'share_$sharePublicKey';
-    await _store.record(shareId).put(db, {
-      'eventId': eventId,
-      'sharePublicKey': sharePublicKey,
-      'sharePrivateKey': sharePrivateKey,
-      'hasPassword': password != null,
-      'createdAt': DateTime.now().toIso8601String(),
-      'createdBy': account.pubkey,
-      'relays': shareRelays,
-    });
+    final shareLink = '$baseUrl/$nevent/$encodedKey';
 
-    return {
-      'shareLink': shareLink,
-      'shareKey': encodedKey,
-      'publicKey': sharePublicKey,
-      'eventId': eventId,
-      if (password != null) 'password': password,
-    };
-  }
-
-  // Access a shared file via share link
-  Future<DriveItem> accessSharedFile({
-    required String shareKeyOrLink,
-    String? password,
-    List<String>? relays,
-  }) async {
-    // Extract the key from the link if a full URL is provided
-    String shareKey = shareKeyOrLink;
-    if (shareKeyOrLink.startsWith('http')) {
-      final parts = shareKeyOrLink.split('/');
-      shareKey = parts.last;
-    }
-
-    // Decode the private key
-    String privateKey;
-
-    if (shareKey.startsWith('ncryptsec1')) {
-      // NIP-49 encrypted private key
-      if (password == null || password.isEmpty) {
-        throw Exception('Password required for encrypted share link');
-      }
-
-      try {
-        privateKey = await Nip49.decrypt(shareKey, password);
-      } catch (e) {
-        throw Exception('Invalid password or corrupted share key');
-      }
-    } else if (shareKey.startsWith('nsec1')) {
-      // Regular nsec private key
-      try {
-        privateKey = Nip19.nsecToHex(shareKey);
-      } catch (e) {
-        throw Exception('Invalid share key format');
-      }
-    } else {
-      throw Exception('Unsupported share key format');
-    }
-
-    // Generate the keypair from private key
-    final shareKeyPair = KeyPair.fromPrivateKey(privateKey: privateKey);
-    final publicKey = shareKeyPair.publicKey;
-
-    // Create a temporary NDK instance with the share keypair
-    final shareRelays =
-        relays ??
-        ['wss://relay.damus.io', 'wss://relay.nostr.band', 'wss://nos.lol'];
-
-    final tempNdk = Ndk(
-      NdkConfig(
-        eventVerifier: Bip340EventVerifier(),
-        cache: MemCacheManager(),
-        engine: NdkEngine.JIT,
-      ),
-    );
-
-    // Login with the share keypair
-    tempNdk.accounts.loginPrivateKey(pubkey: publicKey, privkey: privateKey);
-
-    // The relays will be used in the query as explicitRelays
-    // No need to explicitly connect here
-
-    // Query for files shared with this pubkey
-    final response = tempNdk.requests.query(
-      filters: [
-        Filter(
-          kinds: const [9500],
-          tags: {
-            'p': [publicKey],
-          },
-        ),
-      ],
-      explicitRelays: shareRelays,
-    );
-    final events = await response.stream.toList();
-
-    if (events.isEmpty) {
-      throw Exception('No files found for this share link');
-    }
-
-    // Get the most recent share event
-    final shareEvent = events.first;
-
-    // Decrypt the content
-    final account = tempNdk.accounts.getLoggedAccount();
-    if (account == null) {
-      throw Exception('Failed to access share account');
-    }
-
-    final decryptedContent = await account.signer.decryptNip44(
-      ciphertext: shareEvent.content,
-      senderPubKey: shareEvent.pubKey,
-    );
-
-    if (decryptedContent == null) {
-      throw Exception('Failed to decrypt shared file');
-    }
-
-    // Parse the decrypted content
-    final fileMetadata = jsonDecode(decryptedContent) as Map<String, dynamic>;
-
-    // Store the shared file locally for the current user
-    final currentAccount = ndk.accounts.getLoggedAccount();
-    if (currentAccount != null) {
-      // Store with a reference to the share
-      await _store.record('shared_${shareEvent.id}').put(db, {
-        'nostrEvent': shareEvent.toJson(),
-        'decryptedContent': fileMetadata,
-        'sharedVia': 'link',
-        'sharePublicKey': publicKey,
-        'accessedAt': DateTime.now().toIso8601String(),
-      });
-    }
-
-    // Clean up temporary NDK instance
-    tempNdk.destroy();
-
-    // Create and return the DriveItem
-    return DriveItemFactory.fromJson({
-      'decryptedContent': fileMetadata,
-      'nostrEvent': shareEvent.toJson(),
-    });
+    return shareLink;
   }
 
   // Revoke a share link
@@ -720,8 +640,9 @@ class DriveService {
             if (nostrEvent == null) return false;
 
             final pubkey = nostrEvent['pubkey'] as String?;
-            if (pubkey == null || pubkey == account.pubkey)
+            if (pubkey == null || pubkey == account.pubkey) {
               return false; // Skip our own files
+            }
 
             // Check if we're tagged
             final tags = nostrEvent['tags'] as List<dynamic>?;
