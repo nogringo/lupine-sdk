@@ -18,7 +18,8 @@ class DriveItemFactory {
           hash: decryptedContent['hash'] as String,
           path: decryptedContent['path'] as String,
           size: decryptedContent['size'] as int,
-          fileType: decryptedContent['file-type'] as String,
+          fileType:
+              decryptedContent['file-type'] as String?, // This can be null
           encryptionAlgorithm:
               decryptedContent['encryption-algorithm'] as String?,
           decryptionKey: decryptedContent['decryption-key'] as String?,
