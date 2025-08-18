@@ -1,7 +1,8 @@
 import 'dart:convert';
 
-import 'package:lupine_sdk/src/models/drive_item.dart';
+import 'package:lupine_sdk/src/models/file_metadata.dart';
 import 'package:lupine_sdk/src/models/drive_item_factory.dart';
+import 'package:lupine_sdk/src/models/shared_file_access.dart';
 import 'package:lupine_sdk/src/utils/nevent.dart';
 import 'package:ndk/ndk.dart';
 import 'package:nip01/nip01.dart';
@@ -12,14 +13,14 @@ import 'package:nip49/nip49.dart';
 ///
 /// [shareLink] - The full share link in format: baseUrl/nevent/nsecORncryptsec
 ///
-/// Returns a map containing:
+/// Returns a [SharedFileAccess] containing:
 /// - eventId: The event ID from the nevent
 /// - relays: The relay URLs from the nevent
 /// - author: The author pubkey from the nevent (if present)
 /// - kind: The event kind from the nevent (if present)
-/// - keyString: The nsec or ncryptsec string
-/// - isEncrypted: Whether the key is encrypted (ncryptsec)
-Map<String, dynamic> parseShareLink(String shareLink) {
+/// - encodedPrivateKey: The nsec or ncryptsec string
+/// - isPasswordProtected: Whether the key is encrypted (ncryptsec)
+SharedFileAccess parseShareLink(String shareLink) {
   // Format: baseUrl/nevent/nsecORncryptsec
   final parts = shareLink.split('/');
   if (parts.length < 2) {
@@ -33,17 +34,17 @@ Map<String, dynamic> parseShareLink(String shareLink) {
   final nevent = NeventCodec.decode(neventStr);
 
   // Determine if key is encrypted
-  final isEncrypted = keyStr.startsWith('ncryptsec1');
+  final isPasswordProtected = keyStr.startsWith('ncryptsec1');
 
-  return {
-    'eventId': nevent.eventId,
-    'relays': nevent.relays,
-    'author': nevent.author,
-    'kind': nevent.kind,
-    'keyString': keyStr,
-    'isEncrypted': isEncrypted,
-    'nevent': neventStr,
-  };
+  return SharedFileAccess(
+    eventId: nevent.eventId,
+    relays: nevent.relays ?? [],
+    author: nevent.author ?? '',
+    kind: nevent.kind ?? 0,
+    encodedPrivateKey: keyStr,
+    isPasswordProtected: isPasswordProtected,
+    nevent: neventStr,
+  );
 }
 
 /// Helper function to decode private key from a share link key string.
@@ -84,8 +85,8 @@ Future<String> decodeShareKey(String keyStr, {String? password}) async {
 /// [nevent] - The nevent string containing the event ID and relays
 /// [privateKey] - The hex private key to decrypt the shared content
 ///
-/// Returns a [DriveItem] representing the shared file or folder.
-Future<DriveItem> accessSharedFile({
+/// Returns a [FileMetadata] representing the shared file.
+Future<FileMetadata> accessSharedFile({
   required String nevent,
   required String privateKey,
 }) async {
@@ -93,6 +94,7 @@ Future<DriveItem> accessSharedFile({
   final decodedNevent = NeventCodec.decode(nevent);
   final eventId = decodedNevent.eventId;
   final relays = decodedNevent.relays;
+  print(relays);
 
   // Generate the keypair from private key
   final shareKeyPair = KeyPair.fromPrivateKey(privateKey: privateKey);
@@ -103,11 +105,12 @@ Future<DriveItem> accessSharedFile({
       relays ??
       ['wss://relay.damus.io', 'wss://relay.nostr.band', 'wss://nos.lol'];
 
+  print(shareRelays);
+
   final tempNdk = Ndk(
     NdkConfig(
       eventVerifier: Bip340EventVerifier(),
       cache: MemCacheManager(),
-      engine: NdkEngine.JIT,
     ),
   );
 
@@ -162,11 +165,17 @@ Future<DriveItem> accessSharedFile({
     // Parse the decrypted content
     final fileMetadata = jsonDecode(decryptedContent) as Map<String, dynamic>;
 
-    // Create and return the DriveItem
-    return DriveItemFactory.fromJson({
+    // Create and return the FileMetadata
+    final driveItem = DriveItemFactory.fromJson({
       'decryptedContent': fileMetadata,
       'nostrEvent': shareEvent.toJson(),
     });
+    
+    if (driveItem is! FileMetadata) {
+      throw Exception('Shared item is not a file');
+    }
+    
+    return driveItem;
   } finally {
     // Clean up temporary NDK instance
     tempNdk.destroy();

@@ -543,12 +543,18 @@ class DriveService {
     // Use provided relays or default ones
     final shareRelays =
         relays ??
-        ['wss://relay.damus.io', 'wss://relay.nostr.band', 'wss://nos.lol'];
+        ['wss://relay.damus.io', 'wss://relay.nostr.band', 'wss://nos.lol', 'wss://relay.primal.net'];
 
     // Share the file with the new pubkey
     final shareEvent = await shareWithNostrUser(
       eventId: eventId,
       recipientPubkey: sharePublicKey,
+    );
+
+    // Broadcast the share event to the specific relays
+    ndk.broadcast.broadcast(
+      nostrEvent: shareEvent,
+      specificRelays: shareRelays,
     );
 
     // Create nevent using the NeventCodec
