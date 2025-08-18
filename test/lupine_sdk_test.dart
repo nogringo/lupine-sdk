@@ -96,17 +96,15 @@ void main() {
       );
 
       // Download the file content
-      if (sharedItem is FileMetadata) {
-        final downloadedData = await driveService.downloadFile(
-          hash: sharedItem.hash,
-          decryptionKey: sharedItem.decryptionKey,
-          decryptionNonce: sharedItem.decryptionNonce,
-        );
+      final downloadedData = await driveService.downloadFile(
+        hash: sharedItem.hash,
+        decryptionKey: sharedItem.decryptionKey,
+        decryptionNonce: sharedItem.decryptionNonce,
+      );
 
-        // Verify the downloaded content matches original
-        final downloadedContent = String.fromCharCodes(downloadedData);
-        expect(downloadedContent, equals(fileContent));
-      }
+      // Verify the downloaded content matches original
+      final downloadedContent = String.fromCharCodes(downloadedData);
+      expect(downloadedContent, equals(fileContent));
     });
   });
 }

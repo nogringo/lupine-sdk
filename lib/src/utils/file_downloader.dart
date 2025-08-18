@@ -7,12 +7,12 @@ import 'package:cryptography/cryptography.dart';
 import 'package:ndk/ndk.dart';
 
 /// Downloads a file from Blossom servers
-/// 
+///
 /// [hash] - The SHA256 hash of the file to download
 /// [blossomServers] - List of Blossom server URLs to try downloading from
 /// [decryptionInfo] - Optional decryption information containing key and nonce
 /// [ndk] - Optional NDK instance for communication. If null, a new instance will be created
-/// 
+///
 /// Returns the decrypted file data as Uint8List
 Future<Uint8List> downloadFileFromBlossom({
   required String hash,
@@ -23,7 +23,7 @@ Future<Uint8List> downloadFileFromBlossom({
   // Create NDK instance if not provided
   final ndkInstance = ndk ?? Ndk.emptyBootstrapRelaysConfig();
   bool shouldDestroy = false;
-  
+
   if (ndk == null) {
     // Mark that we should destroy the instance when done
     shouldDestroy = true;

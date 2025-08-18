@@ -108,10 +108,7 @@ Future<FileMetadata> accessSharedFile({
   print(shareRelays);
 
   final tempNdk = Ndk(
-    NdkConfig(
-      eventVerifier: Bip340EventVerifier(),
-      cache: MemCacheManager(),
-    ),
+    NdkConfig(eventVerifier: Bip340EventVerifier(), cache: MemCacheManager()),
   );
 
   try {
@@ -170,11 +167,11 @@ Future<FileMetadata> accessSharedFile({
       'decryptedContent': fileMetadata,
       'nostrEvent': shareEvent.toJson(),
     });
-    
+
     if (driveItem is! FileMetadata) {
       throw Exception('Shared item is not a file');
     }
-    
+
     return driveItem;
   } finally {
     // Clean up temporary NDK instance

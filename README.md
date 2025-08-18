@@ -27,7 +27,6 @@ print('Folder created successfully');
 
 ## TODO
 
- - [ ] Share methods
  - [ ] Sync
 
 ## My Nostr for contact and donation
