@@ -1,6 +1,6 @@
 name: lupine_sdk
 description: Secure, encrypted cloud drive service built on Nostr protocol with real-time sync.
-version: 2.0.0
+version: 2.0.1
 repository: https://github.com/nogringo/lupine-sdk
 
 environment:
@@ -11,12 +11,12 @@ dependencies:
   convert: ^3.1.2
   crypto: ^3.0.6
   cryptography: ^2.7.0
-  ndk: ^0.5.0
+  ndk: ^0.5.1
   nip01: ^0.3.0+1
   nip19: ^0.2.0
-  nip49: ^1.1.1
+  nip49: ^1.1.2
   path: ^1.9.1
-  pointycastle: ^3.9.1
+  pointycastle: ^4.0.0
   sembast: ^3.8.5+1
 
 dev_dependencies:
